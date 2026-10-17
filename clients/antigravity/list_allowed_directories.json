@@ -1,0 +1,1 @@
+{"name":"list_allowed_directories","description":"Return the fixed vault root and note access policy; MCP client roots cannot expand it.","parameters":{"$schema":"http://json-schema.org/draft-07/schema#","additionalProperties":false,"properties":{},"type":"object"}}

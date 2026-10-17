@@ -1,0 +1,8 @@
+node_modules/
+backups/
+*.log
+*.pid
+*.flock
+tmp/
+.loey-synthetic
+.env
