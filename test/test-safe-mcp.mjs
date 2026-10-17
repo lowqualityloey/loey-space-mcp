@@ -3,99 +3,118 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
-import {createPolicy, runCanonical, createServer} from './safe-mcp.mjs';
+import {fileURLToPath} from 'node:url';
+import {createPolicy, runCanonical, createServer, resolveCliPath} from '../src/safe-mcp.mjs';
+import {createMockVault} from './helpers/mock-vault.mjs';
 
-const VAULT_ROOT = '/mnt/c/Users/jonel/Documents/loey_space';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const MOCK_CLI = path.resolve(__dirname, 'helpers/mock-cli.cjs');
+const CLIENT_SCHEMA = path.resolve(__dirname, '../clients/antigravity/heyloey_done.json');
 
 test('createPolicy - boundary & path restrictions', async () => {
-  const policy = await createPolicy(VAULT_ROOT);
+  const vault = await createMockVault();
+  try {
+    const policy = await createPolicy(vault.root);
 
-  // Allowed root files
-  assert.equal(policy.permitted(path.join(policy.root, 'Home.md'), false), true);
-  assert.equal(policy.permitted(path.join(policy.root, 'memory.md'), false), true);
-  assert.equal(policy.permitted(path.join(policy.root, 'handoff.md'), false), true);
-  assert.equal(policy.permitted(path.join(policy.root, 'AGENTS.md'), false), true);
+    // Allowed root files
+    assert.equal(policy.permitted(path.join(policy.root, 'Home.md'), false), true);
+    assert.equal(policy.permitted(path.join(policy.root, 'memory.md'), false), true);
+    assert.equal(policy.permitted(path.join(policy.root, 'handoff.md'), false), true);
+    assert.equal(policy.permitted(path.join(policy.root, 'AGENTS.md'), false), true);
 
-  // Disallowed root files
-  assert.equal(policy.permitted(path.join(policy.root, 'package.json'), false), false);
-  assert.equal(policy.permitted(path.join(policy.root, '.gitignore'), false), false);
-  assert.equal(policy.permitted(path.join(policy.root, '.env'), false), false);
+    // Disallowed root files
+    assert.equal(policy.permitted(path.join(policy.root, 'package.json'), false), false);
+    assert.equal(policy.permitted(path.join(policy.root, '.gitignore'), false), false);
+    assert.equal(policy.permitted(path.join(policy.root, '.env'), false), false);
 
-  // Allowed directories
-  assert.equal(policy.permitted(path.join(policy.root, '00-Inbox'), true), true);
-  assert.equal(policy.permitted(path.join(policy.root, '01-Daily'), true), true);
-  assert.equal(policy.permitted(path.join(policy.root, '02-Projects'), true), true);
-  assert.equal(policy.permitted(path.join(policy.root, '03-Dev'), true), true);
+    // Allowed directories
+    assert.equal(policy.permitted(path.join(policy.root, '00-Inbox'), true), true);
+    assert.equal(policy.permitted(path.join(policy.root, '01-Daily'), true), true);
+    assert.equal(policy.permitted(path.join(policy.root, '02-Projects'), true), true);
+    assert.equal(policy.permitted(path.join(policy.root, '03-Dev'), true), true);
 
-  // Disallowed / private directories
-  assert.equal(policy.permitted(path.join(policy.root, '00-Private'), true), false);
-  assert.equal(policy.permitted(path.join(policy.root, '05-Personal'), true), false);
-  assert.equal(policy.permitted(path.join(policy.root, '.secrets'), true), false);
-  assert.equal(policy.permitted(path.join(policy.root, '.git'), true), false);
+    // Disallowed / private directories
+    assert.equal(policy.permitted(path.join(policy.root, '00-Private'), true), false);
+    assert.equal(policy.permitted(path.join(policy.root, '05-Personal'), true), false);
+    assert.equal(policy.permitted(path.join(policy.root, '.secrets'), true), false);
+    assert.equal(policy.permitted(path.join(policy.root, '.git'), true), false);
 
-  // Path traversal prevention
-  assert.equal(policy.permitted('/etc/passwd', false), false);
-  assert.equal(policy.permitted(path.join(policy.root, '../package.json'), false), false);
+    // Path traversal prevention
+    assert.equal(policy.permitted('/etc/passwd', false), false);
+    assert.equal(policy.permitted(path.join(policy.root, '../package.json'), false), false);
 
-  // File type restriction in folders
-  assert.equal(policy.permitted(path.join(policy.root, '02-Projects/FastDesk/FastDesk.md'), false), true);
-  assert.equal(policy.permitted(path.join(policy.root, '06-Resources/scripts/heyloey.js'), false), false);
+    // File type restriction in folders
+    assert.equal(policy.permitted(path.join(policy.root, '02-Projects/FastDesk/FastDesk.md'), false), true);
+    assert.equal(policy.permitted(path.join(policy.root, '06-Resources/scripts/heyloey.js'), false), false);
+  } finally {
+    await vault.cleanup();
+  }
 });
 
 test('policy.resolve - traversal and null byte rejection', async () => {
-  const policy = await createPolicy(VAULT_ROOT);
+  const vault = await createMockVault();
+  try {
+    const policy = await createPolicy(vault.root);
 
-  await assert.rejects(
-    async () => policy.resolve('Home.md\0.txt'),
-    /Access denied by note policy/
-  );
+    await assert.rejects(
+      async () => policy.resolve('Home.md\0.txt'),
+      /Access denied by note policy/
+    );
 
-  await assert.rejects(
-    async () => policy.resolve('../../etc/passwd'),
-    /Access denied by note policy/
-  );
+    await assert.rejects(
+      async () => policy.resolve('../../etc/passwd'),
+      /Access denied by note policy/
+    );
 
-  await assert.rejects(
-    async () => policy.resolve('00-Private/SOUL.md'),
-    /Access denied by note policy/
-  );
+    await assert.rejects(
+      async () => policy.resolve('00-Private/SOUL.md'),
+      /Access denied by note policy/
+    );
 
-  await assert.rejects(
-    async () => policy.resolve('.env'),
-    /Access denied by note policy/
-  );
+    await assert.rejects(
+      async () => policy.resolve('.env'),
+      /Access denied by note policy/
+    );
 
-  const resolved = await policy.resolve('Home.md');
-  assert.equal(resolved, path.join(policy.root, 'Home.md'));
+    const resolved = await policy.resolve('Home.md');
+    assert.equal(resolved, path.join(policy.root, 'Home.md'));
+  } finally {
+    await vault.cleanup();
+  }
 });
 
 test('policy.read - basic read and windowed offset paging', async () => {
-  const policy = await createPolicy(VAULT_ROOT);
+  const vault = await createMockVault();
+  try {
+    const policy = await createPolicy(vault.root);
 
-  // Default read from line 0
-  const chunk1 = await policy.read('Home.md', 3, 0);
-  assert.equal(chunk1.head, 3);
-  assert.equal(chunk1.offset, 0);
-  assert.ok(chunk1.totalLines > 3);
-  assert.equal(chunk1.truncated, true);
-  assert.ok(chunk1.next_cursor);
-  const lines1 = chunk1.text.split('\n');
-  assert.equal(lines1.length, 3);
+    // Default read from line 0
+    const chunk1 = await policy.read('Home.md', 3, 0);
+    assert.equal(chunk1.head, 3);
+    assert.equal(chunk1.offset, 0);
+    assert.ok(chunk1.totalLines > 3);
+    assert.equal(chunk1.truncated, true);
+    assert.ok(chunk1.next_cursor);
+    const lines1 = chunk1.text.split('\n');
+    assert.equal(lines1.length, 3);
 
-  // Second window starting at offset 3
-  const chunk2 = await policy.read('Home.md', 3, 3);
-  assert.equal(chunk2.head, 3);
-  assert.equal(chunk2.offset, 3);
-  assert.equal(chunk2.totalLines, chunk1.totalLines);
-  const lines2 = chunk2.text.split('\n');
-  assert.equal(lines2.length, 3);
-  assert.notDeepEqual(lines1, lines2);
+    // Second window starting at offset 3
+    const chunk2 = await policy.read('Home.md', 3, 3);
+    assert.equal(chunk2.head, 3);
+    assert.equal(chunk2.offset, 3);
+    assert.equal(chunk2.totalLines, chunk1.totalLines);
+    const lines2 = chunk2.text.split('\n');
+    assert.equal(lines2.length, 3);
+    assert.notDeepEqual(lines1, lines2);
 
-  // Out of bounds offset returns empty text cleanly
-  const outOfBounds = await policy.read('Home.md', 10, 999999);
-  assert.equal(outOfBounds.text, '');
-  assert.equal(outOfBounds.truncated, false);
-  assert.equal(outOfBounds.next_cursor, null);
+    // Out of bounds offset returns empty text cleanly
+    const outOfBounds = await policy.read('Home.md', 10, 999999);
+    assert.equal(outOfBounds.text, '');
+    assert.equal(outOfBounds.truncated, false);
+    assert.equal(outOfBounds.next_cursor, null);
+  } finally {
+    await vault.cleanup();
+  }
 });
 
 test('policy.read - long line partial continuation & source reconstruction', async () => {
@@ -135,58 +154,66 @@ test('policy.read - long line partial continuation & source reconstruction', asy
 });
 
 test('policy.list - directory listing filtering', async () => {
-  const policy = await createPolicy(VAULT_ROOT);
-  const entries = await policy.list('.');
+  const vault = await createMockVault();
+  try {
+    const policy = await createPolicy(vault.root);
+    const entries = await policy.list('.');
 
-  const names = entries.map(e => e.name);
-  assert.ok(names.includes('00-Inbox'));
-  assert.ok(names.includes('01-Daily'));
-  assert.ok(names.includes('02-Projects'));
-  assert.ok(names.includes('Home.md'));
+    const names = entries.map(e => e.name);
+    assert.ok(names.includes('00-Inbox'));
+    assert.ok(names.includes('01-Daily'));
+    assert.ok(names.includes('02-Projects'));
+    assert.ok(names.includes('Home.md'));
 
-  // Disallowed folders must never appear in listing
-  assert.ok(!names.includes('00-Private'));
-  assert.ok(!names.includes('05-Personal'));
-  assert.ok(!names.includes('.secrets'));
-  assert.ok(!names.includes('.git'));
-  assert.ok(!names.includes('.env'));
+    // Disallowed folders must never appear in listing
+    assert.ok(!names.includes('00-Private'));
+    assert.ok(!names.includes('05-Personal'));
+    assert.ok(!names.includes('.secrets'));
+    assert.ok(!names.includes('.git'));
+    assert.ok(!names.includes('.env'));
+  } finally {
+    await vault.cleanup();
+  }
 });
 
 test('runCanonical - unauthorized command rejection & lock-state', async () => {
-  const policy = await createPolicy(VAULT_ROOT);
+  const vault = await createMockVault();
+  try {
+    const policy = await createPolicy(vault.root);
 
-  await assert.rejects(
-    async () => runCanonical(policy, 'rm', ['-rf']),
-    /Unsupported canonical command/
-  );
+    await assert.rejects(
+      async () => runCanonical(policy, 'rm', ['-rf'], { cli: MOCK_CLI }),
+      /Unsupported canonical command/
+    );
 
-  const lockState = await runCanonical(policy, 'lock-state', []);
-  assert.equal(lockState.exitCode, 0);
-  assert.equal(lockState.successful, true);
-  assert.ok(lockState.output.includes('[heyloey] LOCK'));
+    const lockState = await runCanonical(policy, 'lock-state', [], { cli: MOCK_CLI });
+    assert.equal(lockState.exitCode, 0);
+    assert.equal(lockState.successful, true);
+    assert.ok(lockState.output.includes('[heyloey] LOCK'));
+  } finally {
+    await vault.cleanup();
+  }
 });
 
 test('runCanonical - descendant process teardown & bounded settlement', async () => {
-  const policy = await createPolicy(VAULT_ROOT);
+  const vault = await createMockVault();
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loey-test-orphan-'));
   const orphanCli = path.join(tmpDir, 'orphan.cjs');
   const pidPath = path.join(tmpDir, 'grandchild.pid');
 
-  // Child exits on SIGTERM, but grandchild traps SIGTERM, outputs >128KB, and holds pipe open
   await fs.writeFile(
     orphanCli,
     `const {spawn}=require('node:child_process');const fs=require('node:fs');const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});process.stdout.write('A'.repeat(140000));setInterval(()=>{},1000);"],{stdio:['ignore',1,2]});fs.writeFileSync(${JSON.stringify(pidPath)},String(child.pid));setInterval(()=>{},1000);`
   );
 
   try {
+    const policy = await createPolicy(vault.root);
     let settled = false;
-    const started = Date.now();
     const pending = runCanonical(policy, 'lock-state', [], { cli: orphanCli }).then(
       value => { settled = true; return value; },
       error => { settled = true; return { error: error.message }; }
     );
 
-    // Wait 1.5 seconds for child to overflow, get SIGTERM, and trigger teardown
     await new Promise(r => setTimeout(r, 1500));
     assert.equal(settled, true, 'Subprocess call must settle promptly without hanging on inherited pipes');
 
@@ -199,16 +226,18 @@ test('runCanonical - descendant process teardown & bounded settlement', async ()
     assert.ok(result.error && result.error.includes('Canonical CLI did not complete'));
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
+    await vault.cleanup();
   }
 });
 
 test('createServer - failure envelopes for brief/context/lock-state', async () => {
+  const vault = await createMockVault();
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loey-test-failure-'));
   const failureCli = path.join(tmpDir, 'failure.cjs');
   await fs.writeFile(failureCli, 'process.exit(42);');
 
   try {
-    const server = await createServer({ vault: VAULT_ROOT, cli: failureCli });
+    const server = await createServer({ vault: vault.root, cli: failureCli });
     for (const name of ['heyloey_brief', 'heyloey_context', 'heyloey_lock_state']) {
       const tool = server._registeredTools[name];
       assert.ok(tool, `Tool ${name} must be registered`);
@@ -220,45 +249,55 @@ test('createServer - failure envelopes for brief/context/lock-state', async () =
     }
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
+    await vault.cleanup();
   }
 });
 
 test('createServer - schema alignment and parity for heyloey_done', async () => {
-  const server = await createServer({ vault: VAULT_ROOT });
-  const doneTool = server._registeredTools['heyloey_done'];
-  assert.ok(doneTool);
+  const vault = await createMockVault();
+  try {
+    const server = await createServer({ vault: vault.root, cli: MOCK_CLI });
+    const doneTool = server._registeredTools['heyloey_done'];
+    assert.ok(doneTool);
 
-  // Server Zod schema rejects input < 5 characters
-  const parseResult = doneTool.inputSchema.safeParse({ summary: 'abc' });
-  assert.equal(parseResult.success, false, 'Server schema must reject summaries with length < 5');
+    // Server Zod schema rejects input < 5 characters
+    const parseResult = doneTool.inputSchema.safeParse({ summary: 'abc' });
+    assert.equal(parseResult.success, false, 'Server schema must reject summaries with length < 5');
 
-  // Server Zod schema rejects leading '--'
-  const parseDashResult = doneTool.inputSchema.safeParse({ summary: '--flag-injection' });
-  assert.equal(parseDashResult.success, false, 'Server schema must reject summaries starting with --');
+    // Server Zod schema rejects leading '--'
+    const parseDashResult = doneTool.inputSchema.safeParse({ summary: '--flag-injection' });
+    assert.equal(parseDashResult.success, false, 'Server schema must reject summaries starting with --');
 
-  // Verify on-disk Antigravity schema parity
-  const schemaPath = '/home/heyloey/.gemini/antigravity/mcp/loey-space/heyloey_done.json';
-  const schemaJson = JSON.parse(await fs.readFile(schemaPath, 'utf8'));
-  assert.equal(
-    schemaJson.parameters.properties.summary.minLength,
-    5,
-    'Client JSON schema must declare minLength: 5 matching server validation'
-  );
+    // Verify repository client schema parity
+    const schemaJson = JSON.parse(await fs.readFile(CLIENT_SCHEMA, 'utf8'));
+    assert.equal(
+      schemaJson.parameters.properties.summary.minLength,
+      5,
+      'Client JSON schema must declare minLength: 5 matching server validation'
+    );
+  } finally {
+    await vault.cleanup();
+  }
 });
 
 test('createServer - read_text_file tool execution with offset and char_offset', async () => {
-  const server = await createServer({ vault: VAULT_ROOT });
-  const readTool = server._registeredTools['read_text_file'];
-  assert.ok(readTool);
+  const vault = await createMockVault();
+  try {
+    const server = await createServer({ vault: vault.root, cli: MOCK_CLI });
+    const readTool = server._registeredTools['read_text_file'];
+    assert.ok(readTool);
 
-  const res = await readTool.handler({ path: 'Home.md', head: 5, offset: 2, char_offset: 0 });
-  assert.equal(res.isError, false);
-  const data = JSON.parse(res.content[0].text);
-  assert.equal(data.head, 5);
-  assert.equal(data.offset, 2);
-  assert.equal(data.char_offset, 0);
-  assert.ok(data.totalLines > 0);
-  assert.equal(data.text.split('\n').length, 5);
+    const res = await readTool.handler({ path: 'Home.md', head: 5, offset: 2, char_offset: 0 });
+    assert.equal(res.isError, false);
+    const data = JSON.parse(res.content[0].text);
+    assert.equal(data.head, 5);
+    assert.equal(data.offset, 2);
+    assert.equal(data.char_offset, 0);
+    assert.ok(data.totalLines > 0);
+    assert.equal(data.text.split('\n').length, 5);
+  } finally {
+    await vault.cleanup();
+  }
 });
 
 test('policy.read - blank lines and boundary window preservation', async () => {
@@ -310,9 +349,7 @@ test('runCanonical - detached process group (flock pattern) teardown', async () 
   const writerPidFile = path.join(tmpDir, 'writer.pid');
   const flockPidFile = path.join(tmpDir, 'flock.pid');
 
-  // Writer traps SIGTERM, writes PID, fills buffer (>128KB) to trigger early SIGTERM, and loops
   const writerSource = `const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(writerPidFile)},String(process.pid));process.stdout.write('A'.repeat(140000));setInterval(()=>{},1000);`;
-  // Wrapper spawns flock with { stdio: 'inherit', detached: true } simulating canonical flock execution
   const wrapperSource = `const {spawn}=require('node:child_process');const fs=require('node:fs');const child=spawn('/usr/bin/flock',[${JSON.stringify(path.join(tmpDir, 'synthetic.flock'))},process.execPath,${JSON.stringify(writerPath)}],{stdio:'inherit',detached:true});fs.writeFileSync(${JSON.stringify(flockPidFile)},String(child.pid));process.on('SIGTERM',()=>{try{process.kill(-child.pid,'SIGTERM')}catch{}});child.on('exit',(code,signal)=>process.exit(signal?143:(code??1)));`;
 
   await fs.writeFile(writerPath, writerSource);
@@ -328,14 +365,12 @@ test('runCanonical - detached process group (flock pattern) teardown', async () 
       error => { settled = true; result = { error: error.message }; }
     );
 
-    // Wait 2.5 seconds for output buffer cap to be exceeded and teardown to execute
     await new Promise(r => setTimeout(r, 2500));
     assert.equal(settled, true, 'Subprocess call must settle within teardown bounds');
 
     writerPid = Number(await fs.readFile(writerPidFile, 'utf8'));
     flockPid = Number(await fs.readFile(flockPidFile, 'utf8'));
 
-    // Check if writer or flock is still alive
     const isAlive = async pid => {
       try {
         const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
@@ -360,3 +395,30 @@ test('runCanonical - detached process group (flock pattern) teardown', async () 
   }
 });
 
+test('createServer - enforces explicit vault root configuration', async () => {
+  const origEnv = process.env.LOEY_VAULT_ROOT;
+  delete process.env.LOEY_VAULT_ROOT;
+  try {
+    await assert.rejects(
+      async () => createServer({}),
+      /Vault root must be explicitly configured via options\.vault or LOEY_VAULT_ROOT/
+    );
+  } finally {
+    if (origEnv !== undefined) process.env.LOEY_VAULT_ROOT = origEnv;
+  }
+});
+
+test('resolveCliPath - resolves absolute path or command via PATH', async () => {
+  // Absolute path returns as is
+  assert.equal(resolveCliPath('/bin/ls'), '/bin/ls');
+
+  // Command name resolves to absolute path via PATH
+  const nodeResolved = resolveCliPath('node');
+  assert.ok(path.isAbsolute(nodeResolved));
+
+  // Non-existent command throws
+  assert.throws(
+    () => resolveCliPath('nonexistent-binary-12345'),
+    /Canonical CLI executable not found/
+  );
+});

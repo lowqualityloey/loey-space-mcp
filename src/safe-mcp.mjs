@@ -3,11 +3,11 @@ import fs from 'node:fs/promises';
 import {constants} from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {spawn} from 'node:child_process';
+import {spawn, execSync} from 'node:child_process';
 import {createRequire} from 'node:module';
 import {pathToFileURL} from 'node:url';
 
-const require=createRequire('/home/heyloey/.local/share/loey-space-mcp/package.json');
+const require=createRequire(import.meta.url);
 const {McpServer}=await import(require.resolve('@modelcontextprotocol/sdk/server/mcp.js'));
 const {StdioServerTransport}=await import(require.resolve('@modelcontextprotocol/sdk/server/stdio.js'));
 const {z}=await import(require.resolve('zod'));
@@ -168,12 +168,30 @@ async function isAnyProcessAlive(pids){
   return false;
 }
 
-export async function runCanonical(policy,command,args,{cli='/home/heyloey/.local/bin/heyloey',node=process.execPath}={}){
+export function resolveCliPath(cliCandidate) {
+  const candidate = cliCandidate ?? process.env.LOEY_CLI_PATH ?? '/home/heyloey/.local/bin/heyloey';
+  if (path.isAbsolute(candidate)) return candidate;
+  try {
+    const resolved = execSync(`command -v ${JSON.stringify(candidate)}`, { encoding: 'utf8' }).trim();
+    if (resolved && path.isAbsolute(resolved)) return resolved;
+  } catch {}
+  throw Error(`Canonical CLI executable not found: ${candidate}`);
+}
+
+export async function runCanonical(policy,command,args,{cli,node=process.execPath}={}){
   if(!['brief','context','done','lock-state'].includes(command))throw Error('Unsupported canonical command');
+  const resolvedCli = resolveCliPath(cli);
   await cliPreflight(policy,command);
-  const env={PATH:path.dirname(node)+':/usr/bin:/bin',HOME:os.homedir(),LANG:'C.UTF-8',TZ:'Pacific/Auckland',LOEY_SPACE_DIR:policy.root};
+  const env={
+    ...Object.fromEntries(Object.entries(process.env).filter(([k])=>k.startsWith('LOEY_'))),
+    PATH:path.dirname(node)+':/usr/bin:/bin',
+    HOME:os.homedir(),
+    LANG:'C.UTF-8',
+    TZ:'Pacific/Auckland',
+    LOEY_SPACE_DIR:policy.root
+  };
   return new Promise((resolve,reject)=>{
-    const child=spawn(node,[cli,command,...args],{cwd:os.homedir(),env,stdio:['ignore','pipe','pipe'],detached:true});
+    const child=spawn(node,[resolvedCli,command,...args],{cwd:os.homedir(),env,stdio:['ignore','pipe','pipe'],detached:true});
     const childPid=child.pid;
     const allPids=new Set(),allPgids=new Set();
     if(childPid){allPids.add(childPid);allPgids.add(childPid);}
@@ -272,7 +290,11 @@ export async function runCanonical(policy,command,args,{cli='/home/heyloey/.loca
 }
 
 export async function createServer(options={}){
-  const policy=await createPolicy(options.vault??'/mnt/c/Users/jonel/Documents/loey_space');
+  const vaultRoot = options.vault ?? process.env.LOEY_VAULT_ROOT;
+  if (!vaultRoot) {
+    throw Error('Vault root must be explicitly configured via options.vault or LOEY_VAULT_ROOT');
+  }
+  const policy=await createPolicy(vaultRoot);
   const server=new McpServer({name:'loey-space-safe',version:'1.0.0'},{instructions:'External coding access: ordinary notes are read-only. Use heyloey_brief/context for orientation and heyloey_done only for completed milestones. Private/hidden paths and generic writes are unavailable. The Curator owns daily-note creation and general editing.'});
   function tool(name,description,schema,handler,readOnly=true){
     server.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:readOnly,destructiveHint:false}},async args=>{
@@ -298,5 +320,5 @@ export async function createServer(options={}){
   return server;
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(path.resolve(process.argv[1])).href){
-  createServer().then(server=>server.connect(new StdioServerTransport())).catch(()=>{console.error('loey-space-safe failed to start');process.exitCode=1;});
+  createServer().then(server=>server.connect(new StdioServerTransport())).catch(err=>{console.error('loey-space-safe failed to start:',err.message);process.exitCode=1;});
 }

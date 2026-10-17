@@ -1,12 +1,31 @@
-#!/bin/bash
-set -eu
-if [ -x "/home/heyloey/.nvm/versions/node/v24.22.0/bin/node" ]; then
-  NODE_BIN="/home/heyloey/.nvm/versions/node/v24.22.0/bin/node"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve physical path even if invoked via symlink in ~/.local/bin
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+
+# Discover Node binary (prefer Node >= 20)
+if [ -n "${NODE_BIN:-}" ] && [ -x "$NODE_BIN" ]; then
+  NODE_EXEC="$NODE_BIN"
+elif [ -x "/home/heyloey/.nvm/versions/node/v24.22.0/bin/node" ]; then
+  NODE_EXEC="/home/heyloey/.nvm/versions/node/v24.22.0/bin/node"
 else
-  NODE_BIN="$(command -v node)"
+  NODE_EXEC="$(command -v node)"
 fi
+
 if [ "$#" -ne 0 ]; then
   echo "loey-space-mcp: this external-agent interface accepts no extra roots or flags" >&2
   exit 2
 fi
-exec "$NODE_BIN" "/home/heyloey/.local/share/loey-space-mcp/safe-mcp.mjs"
+
+# Ensure default vault root and canonical CLI if not set in client environment
+export LOEY_VAULT_ROOT="${LOEY_VAULT_ROOT:-/mnt/c/Users/jonel/Documents/loey_space}"
+export LOEY_CLI_PATH="${LOEY_CLI_PATH:-$SCRIPT_DIR/canonical/heyloey.cjs}"
+
+exec "$NODE_EXEC" "$SCRIPT_DIR/src/safe-mcp.mjs"

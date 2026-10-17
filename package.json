@@ -1,16 +1,28 @@
 {
   "name": "loey-space-mcp",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "node --test test-safe-mcp.mjs"
+  "description": "Hardened, read-only MCP server for loey_space with kernel-locked canonical milestone logging",
+  "bin": {
+    "loey-space-mcp": "./bin/loey-space-mcp"
   },
-  "keywords": [],
+  "scripts": {
+    "test": "node --test test/test-safe-mcp.mjs",
+    "test:integration": "node --test test/test-integration.mjs",
+    "test:all": "node --test test/test-safe-mcp.mjs test/test-integration.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "obsidian",
+    "second-brain"
+  ],
   "type": "commonjs",
   "dependencies": {
-    "@modelcontextprotocol/server-filesystem": "2026.8.31",
     "@modelcontextprotocol/sdk": "1.32.1",
+    "@modelcontextprotocol/server-filesystem": "2026.8.31",
     "zod": "4.6.5"
   }
 }

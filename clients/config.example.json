@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "loey-space": {
+      "command": "/home/heyloey/.local/bin/loey-space-mcp",
+      "args": [],
+      "env": {
+        "LOEY_VAULT_ROOT": "/mnt/c/Users/jonel/Documents/loey_space",
+        "LOEY_CLI_PATH": "/home/heyloey/.local/bin/heyloey"
+      }
+    }
+  }
+}
