@@ -419,6 +419,60 @@ test('resolveCliPath - resolves absolute path or command via PATH', async () => 
   // Non-existent command throws
   assert.throws(
     () => resolveCliPath('nonexistent-binary-12345'),
-    /Canonical CLI executable not found/
+    /Canonical CLI executable not found: nonexistent-binary-12345/
   );
 });
+
+test('resolveCliPath - handles relative paths, literal shell metacharacters, and missing absolute files', async () => {
+  // Relative path resolution
+  const relativeCandidate = './canonical/heyloey.cjs';
+  const resolvedRelative = resolveCliPath(relativeCandidate);
+  assert.equal(resolvedRelative, path.resolve(relativeCandidate));
+
+  // Shell metacharacters are treated literally without shell evaluation
+  assert.throws(
+    () => resolveCliPath('$(printf node)'),
+    /Canonical CLI executable not found: \$\(printf node\)/
+  );
+
+  // Missing absolute path throws
+  assert.throws(
+    () => resolveCliPath('/tmp/nonexistent-heyloey-file-' + Date.now()),
+    /Canonical CLI executable not found/
+  );
+
+  // Default without args or env resolves to bundled canonical CLI
+  const origCliEnv = process.env.LOEY_CLI_PATH;
+  delete process.env.LOEY_CLI_PATH;
+  try {
+    const defaultCli = resolveCliPath();
+    assert.ok(path.isAbsolute(defaultCli));
+    assert.ok(defaultCli.endsWith('canonical/heyloey.cjs'));
+  } finally {
+    if (origCliEnv !== undefined) process.env.LOEY_CLI_PATH = origCliEnv;
+  }
+});
+
+test('launcher - enforces explicit absolute LOEY_VAULT_ROOT', async () => {
+  const launcherPath = path.resolve(__dirname, '../bin/loey-space-mcp');
+  const {spawnSync} = await import('node:child_process');
+
+  // 1. Missing LOEY_VAULT_ROOT must exit 1
+  const envNoRoot = { ...process.env };
+  delete envNoRoot.LOEY_VAULT_ROOT;
+  const runNoRoot = spawnSync(launcherPath, [], { env: envNoRoot, encoding: 'utf8' });
+  assert.equal(runNoRoot.status, 1);
+  assert.ok(runNoRoot.stderr.includes('LOEY_VAULT_ROOT is required'));
+
+  // 2. Relative LOEY_VAULT_ROOT must exit 1
+  const envRelRoot = { ...process.env, LOEY_VAULT_ROOT: './relative-vault' };
+  const runRelRoot = spawnSync(launcherPath, [], { env: envRelRoot, encoding: 'utf8' });
+  assert.equal(runRelRoot.status, 1);
+  assert.ok(runRelRoot.stderr.includes('LOEY_VAULT_ROOT must be an absolute path'));
+
+  // 3. Extra flags must exit 2
+  const runExtraFlags = spawnSync(launcherPath, ['--extra-flag'], { env: process.env, encoding: 'utf8' });
+  assert.equal(runExtraFlags.status, 2);
+  assert.ok(runExtraFlags.stderr.includes('accepts no extra roots or flags'));
+});
+

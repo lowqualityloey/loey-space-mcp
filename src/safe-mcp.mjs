@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
-import {constants} from 'node:fs';
+import fsSync, {constants} from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {spawn, execSync} from 'node:child_process';
+import {spawn} from 'node:child_process';
 import {createRequire} from 'node:module';
-import {pathToFileURL} from 'node:url';
+import {pathToFileURL, fileURLToPath} from 'node:url';
+
+const DEFAULT_CANONICAL_CLI = fileURLToPath(new URL('../canonical/heyloey.cjs', import.meta.url));
 
 const require=createRequire(import.meta.url);
 const {McpServer}=await import(require.resolve('@modelcontextprotocol/sdk/server/mcp.js'));
@@ -169,13 +171,46 @@ async function isAnyProcessAlive(pids){
 }
 
 export function resolveCliPath(cliCandidate) {
-  const candidate = cliCandidate ?? process.env.LOEY_CLI_PATH ?? '/home/heyloey/.local/bin/heyloey';
-  if (path.isAbsolute(candidate)) return candidate;
+  const candidate = cliCandidate ?? process.env.LOEY_CLI_PATH ?? DEFAULT_CANONICAL_CLI;
+  if (typeof candidate !== 'string' || candidate.trim() === '') {
+    throw Error('Canonical CLI executable path must be a non-empty string');
+  }
+
+  let resolvedPath = null;
+
+  if (candidate.includes(path.sep) || candidate.startsWith('.')) {
+    resolvedPath = path.resolve(candidate);
+  } else {
+    const pathDirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+    for (const dir of pathDirs) {
+      const fullPath = path.join(dir, candidate);
+      try {
+        const stat = fsSync.statSync(fullPath);
+        if (stat.isFile()) {
+          fsSync.accessSync(fullPath, fsSync.constants.X_OK);
+          resolvedPath = fullPath;
+          break;
+        }
+      } catch {}
+    }
+  }
+
+  if (!resolvedPath) {
+    throw Error(`Canonical CLI executable not found: ${candidate}`);
+  }
+
   try {
-    const resolved = execSync(`command -v ${JSON.stringify(candidate)}`, { encoding: 'utf8' }).trim();
-    if (resolved && path.isAbsolute(resolved)) return resolved;
-  } catch {}
-  throw Error(`Canonical CLI executable not found: ${candidate}`);
+    const stat = fsSync.statSync(resolvedPath);
+    if (!stat.isFile()) {
+      throw Error(`Canonical CLI is not a regular file: ${resolvedPath}`);
+    }
+    fsSync.accessSync(resolvedPath, fsSync.constants.R_OK);
+  } catch (err) {
+    if (err.message.startsWith('Canonical CLI is not a regular file')) throw err;
+    throw Error(`Canonical CLI executable not found: ${candidate}`);
+  }
+
+  return resolvedPath;
 }
 
 export async function runCanonical(policy,command,args,{cli,node=process.execPath}={}){

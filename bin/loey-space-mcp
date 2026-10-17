@@ -10,22 +10,36 @@ while [ -h "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 
-# Discover Node binary (prefer Node >= 20)
-if [ -n "${NODE_BIN:-}" ] && [ -x "$NODE_BIN" ]; then
-  NODE_EXEC="$NODE_BIN"
-elif [ -x "/home/heyloey/.nvm/versions/node/v24.22.0/bin/node" ]; then
-  NODE_EXEC="/home/heyloey/.nvm/versions/node/v24.22.0/bin/node"
-else
-  NODE_EXEC="$(command -v node)"
-fi
-
+# Reject any CLI arguments/flags
 if [ "$#" -ne 0 ]; then
   echo "loey-space-mcp: this external-agent interface accepts no extra roots or flags" >&2
   exit 2
 fi
 
-# Ensure default vault root and canonical CLI if not set in client environment
-export LOEY_VAULT_ROOT="${LOEY_VAULT_ROOT:-/mnt/c/Users/jonel/Documents/loey_space}"
+# Discover Node binary
+if [ -n "${NODE_BIN:-}" ] && [ -x "$NODE_BIN" ]; then
+  NODE_EXEC="$NODE_BIN"
+else
+  NODE_EXEC="$(command -v node 2>/dev/null || true)"
+fi
+
+if [ -z "$NODE_EXEC" ] || [ ! -x "$NODE_EXEC" ]; then
+  echo "loey-space-mcp: node executable not found in PATH" >&2
+  exit 1
+fi
+
+# Require explicit, absolute vault root
+if [ -z "${LOEY_VAULT_ROOT:-}" ]; then
+  echo "loey-space-mcp: LOEY_VAULT_ROOT is required but was not set or is empty" >&2
+  exit 1
+fi
+
+if [[ "$LOEY_VAULT_ROOT" != /* ]]; then
+  echo "loey-space-mcp: LOEY_VAULT_ROOT must be an absolute path: $LOEY_VAULT_ROOT" >&2
+  exit 1
+fi
+
+# Default canonical CLI to package-relative bundled implementation if unset
 export LOEY_CLI_PATH="${LOEY_CLI_PATH:-$SCRIPT_DIR/canonical/heyloey.cjs}"
 
 exec "$NODE_EXEC" "$SCRIPT_DIR/src/safe-mcp.mjs"
