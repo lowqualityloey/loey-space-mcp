@@ -54,11 +54,9 @@ test('integration: canonical CLI synthetic skip mode (exit 3, zero writes)', asy
 test('integration: canonical CLI live write in temporary mock vault', async () => {
   const vault = await createMockVault('loey-integration-live-');
   try {
-    // Scaffold valid daily note matching today's date for canonical CLI
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
+    // Scaffold valid daily note matching today's date for canonical CLI (runs under TZ: Pacific/Auckland)
+    const aucklandDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Pacific/Auckland', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    const [year, month, day] = aucklandDate.split('-');
     const todayDir = path.join(vault.root, `01-Daily/${year}-${month}`);
     await fs.mkdir(todayDir, { recursive: true });
     const todayNotePath = path.join(todayDir, `${year}-${month}-${day}.md`);
