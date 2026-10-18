@@ -778,6 +778,7 @@ function archiveHandoffOverflow(overflowLines, monthDir, dateStr) {
     archiveContent = `---
 title: "Handoff Archive (${monthDir})"
 type: review
+kind: archive
 area: system
 status: archived
 created: ${dateStr}
