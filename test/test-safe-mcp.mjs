@@ -555,3 +555,78 @@ test('canonical CLI - brief includes maintenance alerts when thresholds are reac
   }
 });
 
+test('hybrid-search - Porter stemmer, technical tokenizer, and synonym expansion', async () => {
+  const { stem, tokenize, expandQuery } = await import('../src/hybrid-search.mjs');
+
+  // Porter stemmer tests
+  assert.equal(stem('mounts'), 'mount');
+  assert.equal(stem('mounting'), 'mount');
+  assert.equal(stem('mounted'), 'mount');
+  assert.equal(stem('containers'), 'contain');
+  assert.equal(stem('container'), 'contain');
+  assert.equal(stem('desynchronization'), 'desynchron');
+  assert.equal(stem('desynchronized'), 'desynchron');
+  assert.equal(stem('guards'), 'guard');
+  assert.equal(stem('tokens'), 'token');
+
+  // Technical tokenizer tests (camelCase + non-alphanumeric splitting)
+  assert.deepEqual(tokenize('openViking staleDocker-mount'), ['open', 'viking', 'stale', 'docker', 'mount']);
+  assert.deepEqual(tokenize('the a an in on with for'), []); // stop words filtered
+
+  // Query expansion with technical synonyms
+  const expanded = expandQuery(['desync']);
+  assert.ok(expanded.has('desync'));
+  assert.ok(expanded.has('stale'));
+  assert.ok(expanded.has('unhealthi'));
+});
+
+test('hybrid-search & canonical CLI - BM25 context retrieval with procedural fix snippets', async () => {
+  const vault = await createMockVault();
+  try {
+    const devDir = path.join(vault.root, '03-Dev');
+    await fs.mkdir(devDir, { recursive: true });
+
+    // Seed mock runbook with root cause & procedural fix
+    await fs.writeFile(
+      path.join(devDir, 'OpenViking stale Docker WSL mount.md'),
+      [
+        '# 💻 OpenViking stale Docker WSL mount',
+        '',
+        '> **OpenViking container config fails on stale WSL bind mount.**',
+        '',
+        '## 🔍 Root Cause & Procedural Fix',
+        '- Restart existing container to refresh the stale Docker Desktop WSL mount.',
+        '- Verify Docker healthy and plugin-client 200.'
+      ].join('\n')
+    );
+
+    const { searchVaultRunbooks } = await import('../src/hybrid-search.mjs');
+
+    // Test A: Query with inflections and synonyms ("container bind mount desync")
+    const hits = searchVaultRunbooks(vault.root, 'container bind mount desync');
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].title, 'OpenViking stale Docker WSL mount');
+    assert.ok(hits[0].score >= 1.2);
+    assert.ok(hits[0].fix.includes('Restart existing container'));
+
+    // Test B: Nonsense query returns empty array
+    const noHits = searchVaultRunbooks(vault.root, 'nonexistentqueryxyz999');
+    assert.equal(noHits.length, 0);
+
+    // Test C: Canonical CLI context command returns formatted snippet
+    const { execSync } = await import('node:child_process');
+    const cliPath = path.resolve(__dirname, '../canonical/heyloey.cjs');
+    const cliOut = execSync(`node "${cliPath}" context "container bind mount desync"`, {
+      env: { ...process.env, LOEY_SPACE_DIR: vault.root },
+      encoding: 'utf8'
+    });
+    assert.ok(cliOut.includes('=== LAYA CONTEXT ROUTER'));
+    assert.ok(cliOut.includes('Matched Runbooks / 03-Dev Snippets:'));
+    assert.ok(cliOut.includes('03-Dev/OpenViking stale Docker WSL mount.md'));
+    assert.ok(cliOut.includes('Restart existing container to refresh the stale Docker Desktop WSL mount.'));
+  } finally {
+    await vault.cleanup();
+  }
+});
+
+
