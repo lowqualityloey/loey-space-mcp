@@ -533,3 +533,25 @@ test('launcher - enforces explicit absolute LOEY_VAULT_ROOT', async () => {
   assert.ok(runExtraFlags.stderr.includes('accepts no extra roots or flags'));
 });
 
+test('canonical CLI - brief includes maintenance alerts when thresholds are reached', async () => {
+  const vault = await createMockVault();
+  try {
+    const dumpDir = path.join(vault.root, '00-Inbox');
+    await fs.mkdir(dumpDir, { recursive: true });
+    await fs.writeFile(
+      path.join(dumpDir, 'quick-capture-dump.md'),
+      ['# Dump', '', '- capture 1 #do', '- capture 2 #dev', '- capture 3 #concept', '- capture 4 #learn', '- capture 5 #ref', '', '## ✅ Triaged', ''].join('\n')
+    );
+    const { execSync } = await import('node:child_process');
+    const cliPath = path.resolve(__dirname, '../canonical/heyloey.cjs');
+    const out = execSync(`node "${cliPath}" brief`, {
+      env: { ...process.env, LOEY_SPACE_DIR: vault.root },
+      encoding: 'utf8'
+    });
+    assert.ok(out.includes('[MAINTENANCE ALERTS]'));
+    assert.ok(out.includes('⚠️ INBOX: 5 unprocessed captures'));
+  } finally {
+    await vault.cleanup();
+  }
+});
+

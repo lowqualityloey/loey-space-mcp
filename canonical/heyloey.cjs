@@ -1423,6 +1423,39 @@ function stripFrontmatterAndCode(md) {
     .trim();
 }
 
+function findStaleTasksInContent(dailyContent, handoffContent, todayDate) {
+  const stale = [];
+  const dateRegex = /(?:📅|created:)\s*(\d{4}-\d{2}-\d{2})/;
+  const todayMs = new Date(todayDate).getTime();
+
+  function checkLine(line) {
+    const trimmed = line.trim();
+    if (!/^- \[[ \/]\] /.test(trimmed)) return;
+    const match = trimmed.match(dateRegex);
+    if (!match) return;
+    const taskDate = match[1];
+    const taskMs = new Date(taskDate).getTime();
+    if (isNaN(taskMs)) return;
+    const days = Math.floor((todayMs - taskMs) / (1000 * 60 * 60 * 24));
+    if (days >= 7) {
+      const clean = trimmed
+        .replace(/^- \[[ \/]\]\s*/, '')
+        .replace(dateRegex, '')
+        .trim();
+      const snippet = clean.length > 40 ? clean.slice(0, 37) + '...' : clean;
+      stale.push({ text: snippet, days });
+    }
+  }
+
+  if (dailyContent) {
+    for (const line of dailyContent.split(/\r?\n/)) checkLine(line);
+  }
+  if (handoffContent) {
+    for (const line of handoffContent.split(/\r?\n/)) checkLine(line);
+  }
+  return stale;
+}
+
 function generateBrief(includeKiwiSoul = false) {
   const { dateStr, monthDir } = getTodayInfo();
   const memPath = path.join(VAULT_DIR, 'memory.md');
@@ -1528,6 +1561,54 @@ function generateBrief(includeKiwiSoul = false) {
     if (includeKiwiSoul && habits.length > 0) {
       out.push(`HABITS: ${habits.join(' | ')}`);
     }
+  }
+
+  // Maintenance alerts (0 lines when clean)
+  const alerts = [];
+  const dumpPath = path.join(VAULT_DIR, '00-Inbox', 'quick-capture-dump.md');
+  if (fs.existsSync(dumpPath)) {
+    const dumpContent = fs.readFileSync(dumpPath, 'utf8');
+    const dumpLines = dumpContent.split(/\r?\n/);
+    const archiveIdx = dumpLines.findIndex((l) => /^##\s+.*Triaged/i.test(l.trim()));
+    const activeLines = archiveIdx >= 0 ? dumpLines.slice(0, archiveIdx) : dumpLines;
+    const inboxCount = activeLines.filter((l) => /^\s*-\s+/.test(l)).length;
+    if (inboxCount >= 5) {
+      alerts.push(`⚠️ INBOX: ${inboxCount} unprocessed captures in 00-Inbox/quick-capture-dump.md`);
+    }
+  }
+
+  const stamp = aucklandStamp();
+  const aucklandHour = parseInt(stamp.time.split(':')[0], 10);
+  if (fs.existsSync(dailyPath)) {
+    const dailyContent = fs.readFileSync(dailyPath, 'utf8');
+    const habitsMatch = dailyContent.match(/###\s+.*Habits[\s\S]*?(?=\n---|\n##|$)/i);
+    let habitsDone = 0;
+    let habitsTotal = 0;
+    if (habitsMatch) {
+      const habitLines = habitsMatch[0].split(/\r?\n/);
+      for (const h of habitLines) {
+        if (/^\s*-\s*\[x\]/i.test(h)) {
+          habitsDone++;
+          habitsTotal++;
+        } else if (/^\s*-\s*\[ \]/i.test(h)) {
+          habitsTotal++;
+        }
+      }
+    }
+    if (aucklandHour >= 18 && habitsTotal > 0 && habitsDone === 0) {
+      alerts.push(`⚠️ HABITS: 0/${habitsTotal} completed today (Local time: ${stamp.time})`);
+    }
+
+    const handoffContent = fs.existsSync(handoffPath) ? fs.readFileSync(handoffPath, 'utf8') : null;
+    const staleTasks = findStaleTasksInContent(dailyContent, handoffContent, stamp.date);
+    for (const stale of staleTasks.slice(0, 2)) {
+      alerts.push(`⚠️ STALE TASK: "${stale.text}" (${stale.days}d old)`);
+    }
+  }
+
+  if (alerts.length > 0) {
+    out.push('\n[MAINTENANCE ALERTS]');
+    alerts.forEach((a) => out.push(`- ${a}`));
   }
 
   if (includeKiwiSoul && fs.existsSync(soulPath)) {
