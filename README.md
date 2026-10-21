@@ -7,8 +7,9 @@ Hardened Model Context Protocol (MCP) server providing external coding agents wi
 ## 🛡️ Security Model & Architecture
 
 - **Field Engineer vs. Chief-of-Staff Boundary**: External coding agents cannot perform generic markdown writes or scaffold daily notes. The vault curator agent owns general curation.
-- **Strict Read-Only Enforcement**: Ordinary note tools (`read_text_file`, `list_directory`, `get_file_info`) deny private directories (`00-Private/`, `05-Personal/`, `.secrets/`, `.git/`, `.env`) and reject directory traversal (`../`) or symlink escapes.
-- **Single Locked Mutation Path**: `heyloey_done` is the sole mutation tool. It delegates to the companion canonical CLI (`heyloey`) under util-linux kernel locks (`flock`).
+- **Strict Read-Only Enforcement**: Ordinary note tools (`read_text_file`, `list_directory`, `get_file_info`, `list_allowed_directories`) deny private directories (`00-Private/`, `05-Personal/`, `.secrets/`, `.git/`, `.env`) and reject directory traversal (`../`) or symlink escapes.
+- **Zero-Dependency Hybrid Context Retrieval**: `heyloey_context` combines Laya System-1 classification with a pure-JS BM25 ranker, Porter English stemmer, and technical synonym expansion over `03-Dev/` and `08-Concepts/`. It executes in $<1$ms in-memory with zero native C++ bindings.
+- **Single Locked Mutation Path**: `heyloey_done` and `heyloey_learn` are the sole mutation tools. They delegate to the companion canonical CLI (`heyloey`) under util-linux kernel locks (`flock`).
 - **Lossless Paging**: `read_text_file` provides windowed line paging (`head`, `offset`) and character continuation (`char_offset`), guaranteeing 100% exact source reconstruction across long-line cutoffs and blank-line boundaries.
 - **Process Group Isolation**: Spawns CLI tasks detached and discovers all descendant process groups via `/proc`. If a process hangs, saturates pipe buffers (>128 KB), or times out, the entire process tree (including detached `flock` and grandchild writers) is cleanly reaped with `SIGKILL`.
 
@@ -57,13 +58,14 @@ loey-space-mcp/
 │   ├── antigravity/                 # Schemas (heyloey_done.json, read_text_file.json, etc.)
 │   └── config.example.json          # Example client configurations
 ├── src/
-│   └── safe-mcp.mjs                 # Hardened MCP server
+│   ├── hybrid-search.mjs            # Pure-JS BM25 ranker, Porter stemmer, and synonym expansion
+│   └── safe-mcp.mjs                 # Hardened MCP server with note policy and canonical bridges
 ├── test/
 │   ├── helpers/
 │   │   ├── mock-vault.mjs           # Ephemeral vault fixture generator
 │   │   └── mock-cli.cjs             # Mock CLI simulator
-│   ├── test-safe-mcp.mjs            # 14 hermetic unit and regression tests
-│   └── test-integration.mjs         # 3 integration tests running canonical CLI in temp vault
+│   ├── test-safe-mcp.mjs            # 20 hermetic unit and regression tests
+│   └── test-integration.mjs         # 5 integration tests running canonical CLI in temp vault
 └── package.json
 ```
 
@@ -73,15 +75,15 @@ loey-space-mcp/
 
 The repository features two test suites:
 
-1. **Hermetic Unit & Regression Suite** (14 tests, runs in CI without external dependencies):
+1. **Hermetic Unit & Regression Suite** (20 tests, runs in CI without external dependencies):
    ```bash
    npm test
    ```
-2. **Integration Suite** (3 tests, runs real canonical CLI in temporary isolated mock vaults):
+2. **Integration Suite** (5 tests, runs real canonical CLI in temporary isolated mock vaults):
    ```bash
    npm run test:integration
    ```
-3. **Run All**:
+3. **Run All** (25 tests total):
    ```bash
    npm run test:all
    ```
