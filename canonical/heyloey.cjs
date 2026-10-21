@@ -62,10 +62,22 @@ function normalizeDailyLog(content) {
   if (start < 0)
     return content;
   let end = start + 1;
-  while (end < lines.length && !/^#{1,6}\s|^---\s*$/.test(lines[end]))
+  // The parent ends at the next `##` heading or divider. The `###` areas inside it are part of
+  // the log, and each area's bullets and each table still form their own contiguous run below,
+  // so they are timestamp-normalised and sorted independently, oldest first.
+  while (end < lines.length && !/^#{1,2}\s|^---\s*$/.test(lines[end]))
     end++;
+  // The agent area is owned by its one container. Its rows are quoted, and this loose pass is for
+  // the areas that keep plain bullets; sorting the container here would reorder it by a rule that
+  // knows nothing about the table shape, so `sortAgentTable` owns that area instead.
+  const agentArea = logAreaBounds(lines, "agent");
+  const agentEnd = agentArea ? agentArea.end : -1;
   let fenced = false;
   for (let i = start + 1; i < end; ) {
+    if (agentArea && i >= agentArea.start && i < agentEnd) {
+      i = agentEnd;
+      continue;
+    }
     if (/^\s*(```|~~~)/.test(lines[i])) {
       fenced = !fenced;
       i++;
@@ -76,7 +88,7 @@ function normalizeDailyLog(content) {
       continue;
     }
     const bullet = (line) => line.match(/^(- \*\*\[?)([^\]*]+)(\]?\*\*(?::|\s).*)$/);
-    const table = (line) => line.match(/^(> \|\s*)([^|]+?)(\s*\|.*)$/);
+    const table = (line) => line.match(/^((?:> )?\|\s*)([^|]+?)(\s*\|.*)$/);
     const kind = bullet(lines[i]) ? bullet : table;
     const first = kind(lines[i]);
     if (!first || minuteOfDay(first[2]) === null) {
@@ -102,6 +114,7 @@ function normalizeDailyLog(content) {
     lines.splice(i, cursor - i, ...sorted);
     i = cursor;
   }
+  sortAgentTable(lines);
   return lines.join(newline);
 }
 
@@ -394,6 +407,9 @@ let _flockBin = null;
  * Absolute path of `flock`, or null. There is exactly ONE implementation, so this
  * returns the protocol or nothing: it never selects an alternative.
  *
+ * The absolute util-linux locations are probed before PATH, so the protocol is still found
+ * when the caller's PATH is set but does not carry /usr/bin.
+ *
  * NOT AVAILABLE ON NATIVE WINDOWS: `flock` is util-linux, so it exists on Linux and
  * under WSL and not in a cmd/PowerShell environment. This vault's supported Windows
  * path is WSL, and the Windows shims already delegate to `wsl.exe -e`; a native
@@ -403,6 +419,18 @@ function flockBinPath() {
   if (_flockChecked) return _flockBin;
   _flockChecked = true;
   if (process.platform === 'win32') return _flockBin;
+  // The absolute util-linux locations are probed FIRST. A caller whose PATH is set but does
+  // not carry /usr/bin (an empty PATH, a minimal service environment) must still find the one
+  // protocol implementation: resolving through PATH alone is what made every writer refuse
+  // to run while /usr/bin/flock was present on the host.
+  for (const candidate of ['/usr/bin/flock', '/bin/flock']) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      _flockBin = candidate;
+      return _flockBin;
+    } catch (_) {}
+  }
+  // PATH stays the fallback for a host that installs flock somewhere else.
   try {
     const p = execSync('command -v flock 2>/dev/null', { encoding: 'utf8', shell: '/bin/sh' }).trim();
     if (p) _flockBin = p;
@@ -658,17 +686,94 @@ function dailyNotePath(dateStr, monthDir) {
   return path.join(VAULT_DIR, '01-Daily', monthDir, `${dateStr}.md`);
 }
 
-/** Returns the body of a Markdown section, or null when the heading is absent. */
+const DAILY_LOG_HEADING = '## 📝 Daily Log';
+const LOG_AREA_HEADINGS = {
+  personal: '### 🧍 Personal Log',
+  agent: '### 🤖 Agent Milestones',
+  github: '### 🐙 GitHub Activity'
+};
+const LOG_AREA_ORDER = ['personal', 'agent', 'github'];
+
+function headingLevel(line) {
+  const match = /^(#{1,6})\s/.exec(line.trim());
+  return match ? match[1].length : 0;
+}
+
+/** The parent daily log: from `## 📝 Daily Log` to the next `##` heading or divider. */
+function dailyLogBounds(lines) {
+  const start = lines.findIndex((line) => /^## 📝 Daily Log\s*$/.test(line));
+  if (start < 0) return null;
+  let end = start + 1;
+  while (end < lines.length && !/^#{1,2}\s|^---\s*$/.test(lines[end])) end++;
+  return { start, end };
+}
+
+/** One labelled area inside the parent: its heading and the body up to the next `###` heading. */
+function logAreaBounds(lines, area) {
+  const parent = dailyLogBounds(lines);
+  if (!parent) return null;
+  const heading = LOG_AREA_HEADINGS[area];
+  let start = -1;
+  for (let i = parent.start + 1; i < parent.end; i++) {
+    if (lines[i].trim() === heading) {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return null;
+  let end = start + 1;
+  while (end < parent.end && !/^#{3,}\s/.test(lines[end].trim())) end++;
+  return { start, end };
+}
+
+/** Insert a heading block, keeping exactly one blank line between it and its neighbours. */
+function insertHeading(lines, at, heading) {
+  const block = [];
+  if (at > 0 && lines[at - 1].trim() !== '') block.push('');
+  block.push(heading);
+  lines.splice(at, 0, ...block);
+  const after = at + block.length;
+  if (lines[after] !== undefined && lines[after].trim() !== '') lines.splice(after, 0, '');
+  return at + block.length - 1;
+}
+
+/** Create an area heading when it is absent, in canonical order; existing entries never move. */
+function ensureLogArea(lines, area) {
+  const existing = logAreaBounds(lines, area);
+  if (existing) return existing.start;
+  const parent = dailyLogBounds(lines);
+  if (!parent) return null;
+  const heading = LOG_AREA_HEADINGS[area];
+  if (area === 'personal') {
+    let at = parent.start + 1;
+    while (at < parent.end && (lines[at].trim() === '' || lines[at].trim().startsWith('>'))) at++;
+    return insertHeading(lines, at, heading);
+  }
+  for (let index = LOG_AREA_ORDER.indexOf(area) + 1; index < LOG_AREA_ORDER.length; index++) {
+    const later = logAreaBounds(lines, LOG_AREA_ORDER[index]);
+    if (later) return insertHeading(lines, later.start, heading);
+  }
+  return insertHeading(lines, parent.end, heading);
+}
+
+/**
+ * Returns the body of a Markdown section, or null when the heading is absent.
+ *
+ * A section ends at the next heading of the same or a shallower level, so the `###` areas inside
+ * `## 📝 Daily Log` (and any deeper heading inside a `###` section) stay part of their parent.
+ */
 function sectionBody(content, headings) {
   const lines = content.split(/\r?\n/);
   const wanted = Array.isArray(headings) ? headings : [headings];
   for (const heading of wanted) {
     const start = lines.findIndex((l) => l.trim() === heading);
     if (start === -1) continue;
+    const level = headingLevel(heading);
     const out = [];
     for (let i = start + 1; i < lines.length; i++) {
       const line = lines[i];
-      if (/^#{1,6} /.test(line) || line.trim() === '---') break;
+      const lineLevel = headingLevel(line);
+      if ((lineLevel > 0 && lineLevel <= level) || line.trim() === '---') break;
       out.push(line);
     }
     return out.join('\n');
@@ -684,9 +789,29 @@ function verifyDailyEntry(filePath, needle) {
   } catch (e) {
     return { ok: false, reason: e.message };
   }
-  const body = sectionBody(content, ['## 📝 Daily Log', '## 🛠️ Work Log']);
-  if (body === null) return { ok: false, reason: '## 📝 Daily Log section missing' };
-  if (!body.includes(needle)) return { ok: false, reason: 'entry not found inside ## 📝 Daily Log' };
+  if (!dailyLogBounds(content.split(/\r?\n/))) {
+    return { ok: false, reason: '## 📝 Daily Log section missing' };
+  }
+  if (!logAreaHasSummary(content, 'agent', needle)) {
+    return { ok: false, reason: 'entry not found inside ### 🤖 Agent Milestones' };
+  }
+  return { ok: true };
+}
+
+/** Post-write verification: a personal entry must be inside the Personal Log area. */
+function verifyPersonalEntry(filePath, needle) {
+  let content;
+  try {
+    content = fs.readFileSync(filePath, 'utf8');
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+  if (!dailyLogBounds(content.split(/\r?\n/))) {
+    return { ok: false, reason: '## 📝 Daily Log section missing' };
+  }
+  if (!logAreaHasSummary(content, 'personal', needle)) {
+    return { ok: false, reason: 'entry not found inside ### 🧍 Personal Log' };
+  }
   return { ok: true };
 }
 
@@ -716,10 +841,16 @@ function format12hNbsp(time24) {
   return `${String(h).padStart(2, '0')}:${min}&nbsp;${ampm}`;
 }
 
+function format12hPlain(time24) {
+  return format12hNbsp(time24).replace('&nbsp;', ' ');
+}
+
 function splitScopeAndSummary(message) {
   const trimmed = String(message || '').trim();
   const bracketMatch = trimmed.match(/^\[([^\]]+)\]\s*(.*)$/);
-  let scope = '`loey_space`';
+  // A scope is recorded only when the caller supplied one. Guessing `loey_space` for a message
+  // that arrived without provenance is exactly the inference the separation forbids.
+  let scope = '';
   let summary = trimmed;
   if (bracketMatch) {
     const rawScope = bracketMatch[1].trim();
@@ -733,66 +864,341 @@ function splitScopeAndSummary(message) {
       scope = `\`${rawScope}\``;
     }
   }
-  const safeSummary = summary.replace(/\|/g, '\\|');
-  return { scope, summary: safeSummary };
+  return { scope, summary };
 }
 
-function upsertAgentMilestoneCallout(content, timeStr, message) {
-  const timeCell = format12hNbsp(timeStr);
-  const { scope, summary } = splitScopeAndSummary(message);
-  const newRow = `> | ${timeCell} | ${scope} | ${summary} |`;
-
-  const calloutRegex = /> \[!NOTE\]-\s*🤖 Agent Milestone Log[^\n]*\r?\n> \| Time \| Scope \| Milestone \|\r?\n> \| :--- \| :--- \| :--- \|((?:\r?\n> \|[^\n]*)*)/;
-  const existingMatch = content.match(calloutRegex);
-
-  if (existingMatch) {
-    const existingRowsRaw = existingMatch[1] ? existingMatch[1].trim().split(/\r?\n/).filter(Boolean) : [];
-    const updatedRows = [newRow, ...existingRowsRaw];
-    const count = updatedRows.length;
-    const replacement = [
-      `> [!NOTE]- 🤖 Agent Milestone Log (${count} milestone${count === 1 ? '' : 's'} — click to expand)`,
-      `> | Time | Scope | Milestone |`,
-      `> | :--- | :--- | :--- |`,
-      ...updatedRows
-    ].join('\n');
-    return content.replace(calloutRegex, () => replacement);
-  }
-
-  const freshCallout = [
-    `> [!NOTE]- 🤖 Agent Milestone Log (1 milestone — click to expand)`,
-    `> | Time | Scope | Milestone |`,
-    `> | :--- | :--- | :--- |`,
-    newRow
-  ].join('\n');
-
-  const ghRegex = /(\r?\n> \[!NOTE\]-\s*🐙 GitHub Activity Log)/;
-  if (ghRegex.test(content)) {
-    // Callback form: `freshCallout` carries user text, so `$1` must not expand
-    // from inside it and dollar-tokens in the summary stay literal.
-    return content.replace(ghRegex, (match, ghHeader) => `\n${freshCallout}\n${ghHeader}`);
-  }
-
-  const lines = content.split('\n');
-  const sectionIdx = lines.findIndex((l) => l.trim().startsWith('## 📝 Daily Log') || l.trim().startsWith('## 🛠️ Work Log'));
-  if (sectionIdx === -1) {
-    return `${content.trimEnd()}\n\n## 📝 Daily Log\n> _A running timestamp of what happened today._\n- \n\n${freshCallout}\n`;
-  }
-
-  if (lines[sectionIdx].trim().startsWith('## 🛠️ Work Log')) {
-    lines[sectionIdx] = '## 📝 Daily Log';
-  }
-
-  let nextSectionIdx = lines.length;
-  for (let i = sectionIdx + 1; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (t.startsWith('## ') || t.startsWith('### ') || t === '---') {
-      nextSectionIdx = i;
-      break;
+function tableCellsOf(line) {
+  const match = String(line).match(/^(?:>\s*)?\|(.*)\|\s*$/);
+  if (!match) return null;
+  const cells = [];
+  let cell = '';
+  let escaped = false;
+  for (const char of match[1]) {
+    if (escaped) {
+      cell += char;
+      escaped = false;
+    } else if (char === '\\') {
+      cell += char;
+      escaped = true;
+    } else if (char === '|') {
+      cells.push(cell);
+      cell = '';
+    } else {
+      cell += char;
     }
   }
+  cells.push(cell);
+  return cells;
+}
 
-  lines.splice(nextSectionIdx, 0, '', freshCallout, '');
-  return lines.join('\n').replace(/\n{3,}/g, '\n\n');
+function unescapeCell(cell) {
+  return String(cell).replace(/\\\|/g, '|').trim();
+}
+
+function escapeCell(text) {
+  return String(text).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+}
+
+function tableTime(stamp) {
+  const minutes = minuteOfDay(stamp);
+  if (minutes === null) return String(stamp);
+  const hour = String(Math.floor(minutes / 60)).padStart(2, '0');
+  const minute = String(minutes % 60).padStart(2, '0');
+  return format12hNbsp(`${hour}:${minute}`);
+}
+
+function isSeparatorRow(cells) {
+  return Array.isArray(cells) && cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(String(cell).trim()));
+}
+
+function readAgentTableRow(line) {
+  const cells = tableCellsOf(line);
+  if (!cells || cells.length < 3) return null;
+  if (minuteOfDay(cells[0].replace(/&nbsp;/g, ' ')) === null) return null;
+  return {
+    stamp: cells[0].trim(),
+    scope: unescapeCell(cells[1]),
+    summary: unescapeCell(cells.slice(2).join(' | '))
+  };
+}
+
+/** The body of one labelled area, or null when the area is absent. */
+function logAreaBody(lines, area) {
+  const bounds = logAreaBounds(lines, area);
+  if (!bounds) return null;
+  return lines.slice(bounds.start + 1, bounds.end).join('\n');
+}
+
+/**
+ * Area-scoped duplicate detection. A personal entry that happens to share wording with an agent
+ * milestone is a different record, and must neither suppress nor be suppressed by it.
+ */
+function logAreaHasSummary(content, area, summary) {
+  const lines = content.split(/\r?\n/);
+  const body = logAreaBody(lines, area);
+  if (body === null) return false;
+  const needle = unescapeCell(summary);
+  for (const line of body.split(/\r?\n/)) {
+    const row = readAgentTableRow(line);
+    if (row && row.summary.includes(needle)) return true;
+    const bullet = line.match(/^- \*\*(?:\[)?([^\]*]+?)(?:\])?\*\*(?::|\s)\s*(.*)$/);
+    if (bullet && unescapeCell(bullet[2]).includes(needle)) return true;
+  }
+  return false;
+}
+
+const AGENT_TABLE_HEADER = ['| Time | Scope | Milestone |', '| :--- | :--- | :--- |'];
+
+/**
+ * The one collapsible container for the agent area. The area heading plus this single toggle is the
+ * whole presentation: the table is quoted inside the callout, so it stays folded until asked for,
+ * and there is no second title, no parallel bullet list and no competing table.
+ */
+function agentCalloutLabel(count) {
+  return `> [!NOTE]- 🤖 Show entries (${count})`;
+}
+
+const AGENT_CALLOUT = /^> \[!NOTE\]-\s*🤖\s*Show entries/;
+const LEGACY_AGENT_CALLOUT = /^> \[!NOTE\]-\s*🤖 Agent Milestone Log/;
+
+function quoted(line) {
+  return `> ${line}`;
+}
+
+/** The agent area's single container: its toggle, the end of the quoted block and its header row. */
+function findAgentContainer(lines) {
+  const area = logAreaBounds(lines, 'agent');
+  const container = { area: area || null, start: -1, end: -1, header: -1 };
+  if (!area) return container;
+  for (let index = area.start + 1; index < area.end; index++) {
+    if (!AGENT_CALLOUT.test(lines[index].trim())) continue;
+    container.start = index;
+    container.end = index + 1;
+    while (container.end < area.end && /^>/.test(lines[container.end].trim())) container.end++;
+    for (let row = index + 1; row < container.end; row++) {
+      const cells = tableCellsOf(lines[row]);
+      if (cells && /^time$/i.test(String(cells[0]).trim())) {
+        container.header = row;
+        break;
+      }
+    }
+    return container;
+  }
+  return container;
+}
+
+function countAgentRows(lines, container) {
+  if (container.header === -1) return 0;
+  let count = 0;
+  for (let index = container.header + 1; index < container.end; index++) {
+    if (readAgentTableRow(lines[index])) count++;
+  }
+  return count;
+}
+
+/** Stable chronological sort of the area's one table, wherever it is currently kept. */
+function sortAgentTable(lines) {
+  const container = findAgentContainer(lines);
+  const area = container.area || logAreaBounds(lines, 'agent');
+  if (!area) return;
+  const limit = container.start !== -1 ? container.end : area.end;
+  let header = container.header;
+  if (header === -1) {
+    for (let index = area.start + 1; index < limit; index++) {
+      const cells = tableCellsOf(lines[index]);
+      if (cells && /^time$/i.test(String(cells[0]).trim())) {
+        header = index;
+        break;
+      }
+    }
+  }
+  if (header === -1) return;
+  if (container.start !== -1) {
+    let separator = -1;
+    for (let index = container.start + 1; index < container.end; index++) {
+      if (isSeparatorRow(tableCellsOf(lines[index]))) { separator = index; break; }
+    }
+    if (separator !== -1 && (header !== container.start + 1 || separator !== header + 1)) {
+      const structure = [lines[header], lines[separator]];
+      for (const index of [header, separator].sort((left, right) => right - left)) lines.splice(index, 1);
+      lines.splice(container.start + 1, 0, ...structure);
+      header = container.start + 1;
+    }
+    lines[container.start] = agentCalloutLabel(countAgentRows(lines, { ...container, header }));
+  }
+  let first = header + 1;
+  if (isSeparatorRow(tableCellsOf(lines[first] || ''))) first++;
+  let end = first;
+  while (end < limit && readAgentTableRow(lines[end])) end++;
+  if (end - first < 2) return;
+  const rows = lines.slice(first, end);
+  rows.sort((left, right) => minuteOfDay(unescapeCell(tableCellsOf(left)[0])) - minuteOfDay(unescapeCell(tableCellsOf(right)[0])));
+  lines.splice(first, end - first, ...rows);
+}
+
+/** Append rows to the area's one table, creating the collapsible container when it is absent. */
+function appendAgentRows(lines, rows) {
+  ensureLogArea(lines, 'agent');
+  let area = logAreaBounds(lines, 'agent');
+  if (!area) return;
+  let container = findAgentContainer(lines);
+
+  if (container.start === -1) {
+    const at = area.start + 1;
+    const block = [agentCalloutLabel(rows.length), ...AGENT_TABLE_HEADER.map(quoted), ...rows.map(quoted)];
+    if (lines[at] !== undefined && lines[at].trim() !== '') block.unshift('');
+    if (lines[at] !== undefined) block.push('');
+    lines.splice(at, 0, ...block);
+  } else if (container.header === -1) {
+    lines.splice(container.start + 1, 0, ...AGENT_TABLE_HEADER.map(quoted), ...rows.map(quoted));
+  } else {
+    let end = container.end;
+    while (end > container.header + 1 && !readAgentTableRow(lines[end - 1])) end--;
+    const separator = tableCellsOf(lines[container.header + 1] || '');
+    const firstData = container.header + (isSeparatorRow(separator) ? 2 : 1);
+    lines.splice(Math.max(end, firstData), 0, ...rows.map(quoted));
+  }
+
+  area = logAreaBounds(lines, 'agent');
+  container = findAgentContainer(lines);
+  if (container.start !== -1) {
+    lines[container.start] = agentCalloutLabel(countAgentRows(lines, container));
+    if (container.end < area.end && lines[container.end] && lines[container.end].trim() !== '') {
+      lines.splice(container.end, 0, '');
+    }
+  }
+  sortAgentTable(lines);
+}
+
+/**
+ * Fold a legacy `🤖 Agent Milestone Log` callout — wherever an earlier writer left it — into the
+ * area's one collapsible container. The old label is discarded: only `🤖 Show entries (N)` is
+ * written from now on, and its rows are appended to the table that already exists when there is one.
+ */
+function adoptAgentCallout(lines) {
+  const start = lines.findIndex((line) => LEGACY_AGENT_CALLOUT.test(line.trim()));
+  if (start < 0) return 0;
+  let end = start;
+  while (end < lines.length && /^>/.test(lines[end].trim())) end++;
+  const rows = [];
+  for (let i = start + 1; i < end; i++) {
+    const row = readAgentTableRow(lines[i]);
+    if (row) rows.push(`| ${tableTime(row.stamp)} | ${row.scope ? escapeCell(row.scope) : ''} | ${escapeCell(row.summary)} |`);
+  }
+  if (end < lines.length && lines[end].trim() === '') end++;
+  lines.splice(start, end - start);
+  if (!rows.length) return 0;
+  ensureLogArea(lines, 'agent');
+  appendAgentRows(lines, rows);
+  return 1;
+}
+
+/**
+ * Convert the agent area's previous representations into rows: timestamped bullets and the plain
+ * (unquoted) table of the earlier layout. Text that is not a timestamped entry is left untouched.
+ */
+function convertAgentAreaBullets(lines) {
+  const area = logAreaBounds(lines, 'agent');
+  if (!area) return 0;
+  const rows = [];
+  const remove = [];
+  // Everything the one container already holds is that container's business: it is current format,
+  // and re-reading it here would duplicate rows and strand a separator line.
+  const container = findAgentContainer(lines);
+  const owned = (index) => container.start !== -1 && index >= container.start && index < container.end;
+  for (let i = area.start + 1; i < area.end; i++) {
+    if (owned(i)) {
+      i = container.end - 1;
+      continue;
+    }
+    const row = readAgentTableRow(lines[i]);
+    if (row) {
+      rows.push(`| ${tableTime(row.stamp)} | ${row.scope ? escapeCell(row.scope) : ''} | ${escapeCell(row.summary)} |`);
+      remove.push(i);
+      continue;
+    }
+    const cells = tableCellsOf(lines[i]);
+    if (cells && /^time$/i.test(String(cells[0]).trim())) {
+      remove.push(i);
+      let cursor = i + 2;
+      while (cursor < area.end && readAgentTableRow(lines[cursor])) cursor++;
+      for (let j = i + 2; j < cursor; j++) {
+        const parsed = readAgentTableRow(lines[j]);
+        if (parsed) {
+          rows.push(`| ${tableTime(parsed.stamp)} | ${parsed.scope ? escapeCell(parsed.scope) : ''} | ${escapeCell(parsed.summary)} |`);
+        }
+        remove.push(j);
+      }
+      i = cursor - 1;
+      continue;
+    }
+    const match = lines[i].match(/^- \*\*(?:\[)?([^\]*]+?)(?:\])?\*\*(?::|\s)\s*(.*)$/);
+    if (!match || minuteOfDay(match[1]) === null) continue;
+    let summary = match[2].trim();
+    let cursor = i + 1;
+    const continuation = [];
+    while (cursor < area.end && /^(?: {2,}|\t)\S/.test(lines[cursor])) continuation.push(lines[cursor++].trim());
+    if (continuation.length) summary += '<br>' + continuation.join('<br>');
+    rows.push(`| ${tableTime(match[1])} |  | ${escapeCell(summary)} |`);
+    for (let j = i; j < cursor; j++) remove.push(j);
+    i = cursor - 1;
+  }
+  if (!rows.length) return 0;
+  const unique = [...new Set(remove)].sort((a, b) => b - a);
+  for (const index of unique) lines.splice(index, 1);
+  ensureLogArea(lines, 'agent');
+  appendAgentRows(lines, rows);
+  return rows.length;
+}
+
+function insertAgentTableRow(content, timeStr, message) {
+  const { scope, summary } = splitScopeAndSummary(message);
+  const lines = content.split('\n');
+
+  if (!dailyLogBounds(lines)) {
+    return (
+      `${content.trimEnd()}\n\n${DAILY_LOG_HEADING}\n> _A running timestamp of what happened today._\n\n` +
+      `${LOG_AREA_HEADINGS.personal}\n\n${LOG_AREA_HEADINGS.agent}\n\n` +
+      `${agentCalloutLabel(1)}\n${AGENT_TABLE_HEADER.map(quoted).join('\n')}\n` +
+      `> | ${format12hNbsp(timeStr)} | ${scope ? escapeCell(scope) : ''} | ${escapeCell(summary)} |\n\n` +
+      `${LOG_AREA_HEADINGS.github}\n`
+    );
+  }
+
+  // One container, whatever the note arrived with: adopt a stranded legacy callout, fold bullets or
+  // the previous plain table into rows, then append the new row to the table that is now there.
+  ensureLogArea(lines, 'agent');
+  adoptAgentCallout(lines);
+  convertAgentAreaBullets(lines);
+  appendAgentRows(lines, [
+    `| ${format12hNbsp(timeStr)} | ${scope ? escapeCell(scope) : ''} | ${escapeCell(summary)} |`,
+  ]);
+  return lines.join('\n');
+}
+
+/** Personal entries are owner bullets, never table rows and never a scope-inferred agent event. */
+function insertPersonalBullet(content, timeStr, message) {
+  const lines = content.split('\n');
+  if (!dailyLogBounds(lines)) return content;
+  ensureLogArea(lines, 'personal');
+  let area = logAreaBounds(lines, 'personal');
+  if (!area) return content;
+  for (let i = area.end - 1; i > area.start; i--) {
+    if (lines[i].trim() === '-') {
+      lines.splice(i, 1);
+      i++;
+    }
+  }
+  area = logAreaBounds(lines, 'personal');
+  const bullet = `- **${format12hPlain(timeStr)}**: ${cleanMessage(message)}`;
+  let insertAt = area.start + 1;
+  for (let i = area.start + 1; i < area.end; i++) {
+    if (!/^- \*\*(?:\[)?[^\]*]+(?:\])?\*\*(?::|\s)/.test(lines[i])) continue;
+    insertAt = i + 1;
+    while (insertAt < area.end && /^(?: {2,}|\t)\S/.test(lines[insertAt])) insertAt++;
+  }
+  lines.splice(insertAt, 0, bullet);
+  return lines.join('\n');
 }
 
 function logToDailyNote(message, synthetic = detectSynthetic()) {
@@ -812,17 +1218,19 @@ function logToDailyNote(message, synthetic = detectSynthetic()) {
 
   try {
     let content = fs.readFileSync(filePath, 'utf8');
-
     const { summary } = splitScopeAndSummary(message);
-    if (content.includes(message) || (summary.length > 12 && content.includes(summary))) {
-      console.log(`[heyloey] ALREADY-RECORDED daily note: ${rel} (entry already present)`);
-      return { status: 'already-recorded', path: rel, detail: 'entry already present' };
+
+    // Only the agent area counts: an owner's personal entry with the same words is a different
+    // record and must not make this automated milestone look already logged.
+    if (logAreaHasSummary(content, 'agent', summary)) {
+      console.log(`[heyloey] ALREADY-RECORDED daily note: ${rel} (entry already present in the agent area)`);
+      return { status: 'already-recorded', path: rel, detail: 'entry already present in the agent area' };
     }
 
-    content = normalizeDailyLog(upsertAgentMilestoneCallout(content, timeStr, message));
+    content = normalizeDailyLog(insertAgentTableRow(content, timeStr, message));
     atomicWriteFileSync(filePath, content);
 
-    // Confirm the entry landed inside the daily-log section before claiming a write.
+    // Confirm the entry landed inside the agent area before claiming a write.
     const check = verifyDailyEntry(filePath, summary.length > 0 ? summary : message);
     if (!check.ok) {
       console.error(`[heyloey] FAILED daily note: ${rel} - post-write verification: ${check.reason}`);
@@ -832,6 +1240,42 @@ function logToDailyNote(message, synthetic = detectSynthetic()) {
     return { status: 'written', path: rel, detail: `entry added (${timeStr})` };
   } catch (e) {
     console.error(`[heyloey] FAILED daily note: ${rel} - ${e.message}`);
+    return { status: 'failed', path: rel, detail: e.message };
+  }
+}
+
+function logToPersonal(message, synthetic = detectSynthetic()) {
+  const { dateStr, monthDir, timeStr } = getTodayInfo();
+  const filePath = dailyNotePath(dateStr, monthDir);
+  const rel = vaultRel(filePath);
+
+  if (synthetic.synthetic) {
+    console.log(`[heyloey] SKIPPED daily note - explicit synthetic opt-out (${synthetic.reason}); nothing written.`);
+    return { status: 'skipped', path: rel, detail: `synthetic opt-out (${synthetic.reason})` };
+  }
+  if (!fs.existsSync(filePath)) {
+    console.error(`[heyloey] REFUSED daily note: ${rel} is absent - ${DAILY_NOTE_HINT}; nothing written.`);
+    return { status: 'missing', path: rel, detail: 'daily note absent' };
+  }
+
+  try {
+    let content = fs.readFileSync(filePath, 'utf8');
+    const summary = cleanMessage(message);
+    if (logAreaHasSummary(content, 'personal', summary)) {
+      console.log(`[heyloey] ALREADY-RECORDED daily note: ${rel} (entry already present in the personal area)`);
+      return { status: 'already-recorded', path: rel, detail: 'entry already present in the personal area' };
+    }
+    content = normalizeDailyLog(insertPersonalBullet(content, timeStr, summary));
+    atomicWriteFileSync(filePath, content);
+    const check = verifyPersonalEntry(filePath, summary);
+    if (!check.ok) {
+      console.error(`[heyloey] FAILED daily note: ${rel} - post-write verification: ${check.reason}`);
+      return { status: 'failed', path: rel, detail: `post-write verification: ${check.reason}` };
+    }
+    console.log(`[heyloey] LOGGED personal note: ${rel} (${timeStr})`);
+    return { status: 'written', path: rel, detail: `entry added (${timeStr})` };
+  } catch (e) {
+    console.error(`[heyloey] FAILED personal note: ${rel} - ${e.message}`);
     return { status: 'failed', path: rel, detail: e.message };
   }
 }
@@ -1317,10 +1761,23 @@ if (!fs.existsSync(VAULT_DIR)) {
 const prefix = getGitContext();
 const formattedMessage = rawMessage ? `${prefix}${cleanMessage(rawMessage)}` : '';
 
+// Agent milestones and owner entries take free text only. A flag used to be swallowed as part of
+// the text, which silently wrote `--personal` into the agent table; refuse instead of guessing.
+if (['done', 'milestone', 'personal'].includes(command)) {
+  const flags = args.slice(1).filter((arg) => arg.startsWith('--'));
+  if (flags.length) {
+    console.error(
+      `[heyloey] Unsupported option(s) for ${command}: ${flags.join(', ')}.\n` +
+        '[heyloey] Agent milestones take free text only; use `heyloey personal "<entry>"` for an owner entry. Nothing written.'
+    );
+    process.exit(1);
+  }
+}
+
 // Commands that WRITE vault records. Readers (brief/context/status/help/install-hook)
 // take no lock: contention should never delay a read, and install-hook writes into a
 // repository's own .git/hooks, not into vault records.
-const WRITER_COMMANDS = new Set(['done', 'milestone', 'log', 'sync', 'handoff', 'save', 'learn', 'snippet', 'dream', 'prune']);
+const WRITER_COMMANDS = new Set(['done', 'milestone', 'personal', 'log', 'sync', 'handoff', 'save', 'learn', 'snippet', 'dream', 'prune']);
 
 async function dispatch() {
   if (WRITER_COMMANDS.has(command)) {
@@ -1479,6 +1936,27 @@ async function dispatch() {
       ` verified=${finalDaily.ok ? 'daily' : ''}${finalHandoff.ok ? '+handoff' : ''}`
     );
     process.exit(OUTCOME_EXIT[outcome]);
+  }
+
+  case 'personal': {
+    if (!rawMessage || cleanMessage(rawMessage).length < 5) {
+      console.error('Error: Message must be at least 5 characters.');
+      process.exit(1);
+    }
+    const synthetic = detectSynthetic();
+    const daily = logToPersonal(rawMessage, synthetic);
+    const outcome =
+      daily.status === 'written' ? 'logged' :
+      daily.status === 'already-recorded' ? 'already-recorded' :
+      daily.status === 'missing' ? 'refused' : daily.status;
+    reportOutcome(
+      'personal',
+      [['daily', daily], ['handoff', { status: 'not-attempted', path: 'handoff.md', detail: 'personal entries never enter handoff' }]],
+      outcome,
+      synthetic,
+      daily.status === 'written' || daily.status === 'already-recorded' ? ' verified=daily' : ''
+    );
+    process.exit(OUTCOME_EXIT[outcome] ?? 1);
   }
 
   case 'brief':

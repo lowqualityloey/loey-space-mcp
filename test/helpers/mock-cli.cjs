@@ -44,6 +44,20 @@ switch (command) {
     break;
   }
 
+  case 'learn': {
+    const title = args[1] ?? '';
+    const fix = args[2] ?? '';
+    if (title.includes('fail') || fix.includes('fail')) {
+      process.stderr.write('learn failed\n');
+      process.exit(1);
+    } else {
+      process.stdout.write(`[heyloey] Crystallized procedural runbook: 03-Dev/${title}.md\n`);
+      process.stdout.write('[heyloey] LOGGED daily note: 01-Daily/2026-10/2026-10-21.md (17:28)\n');
+      process.exit(0);
+    }
+    break;
+  }
+
   default:
     process.stderr.write(`Unknown command: ${command}\n`);
     process.exit(2);

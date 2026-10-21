@@ -10,6 +10,7 @@ import {createMockVault} from './helpers/mock-vault.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MOCK_CLI = path.resolve(__dirname, 'helpers/mock-cli.cjs');
 const CLIENT_SCHEMA = path.resolve(__dirname, '../clients/antigravity/heyloey_done.json');
+const CLIENT_LEARN_SCHEMA = path.resolve(__dirname, '../clients/antigravity/heyloey_learn.json');
 
 test('createPolicy - boundary & path restrictions', async () => {
   const vault = await createMockVault();
@@ -268,6 +269,14 @@ test('createServer - schema alignment and parity for heyloey_done', async () => 
     const parseDashResult = doneTool.inputSchema.safeParse({ summary: '--flag-injection' });
     assert.equal(parseDashResult.success, false, 'Server schema must reject summaries starting with --');
 
+    // Accepts optional scope
+    const parseWithScope = doneTool.inputSchema.safeParse({ summary: 'completed milestone', scope: 'SupplyWatch/main' });
+    assert.equal(parseWithScope.success, true, 'Server schema must accept optional scope');
+
+    // Rejects invalid scope (brackets)
+    const parseBadScope = doneTool.inputSchema.safeParse({ summary: 'completed milestone', scope: '[bad]' });
+    assert.equal(parseBadScope.success, false, 'Server schema must reject scope containing brackets');
+
     // Verify repository client schema parity
     const schemaJson = JSON.parse(await fs.readFile(CLIENT_SCHEMA, 'utf8'));
     assert.equal(
@@ -275,6 +284,54 @@ test('createServer - schema alignment and parity for heyloey_done', async () => 
       5,
       'Client JSON schema must declare minLength: 5 matching server validation'
     );
+    assert.ok(schemaJson.parameters.properties.scope, 'Client JSON schema must declare optional scope');
+
+    // Execution with scope formats [scope] prefix
+    const res = await doneTool.handler({ summary: 'shipped feature', scope: 'repo/feat' });
+    assert.equal(res.isError, false);
+  } finally {
+    await vault.cleanup();
+  }
+});
+
+test('createServer - schema alignment and parity for heyloey_learn', async () => {
+  const vault = await createMockVault();
+  try {
+    const server = await createServer({ vault: vault.root, cli: MOCK_CLI });
+    const learnTool = server._registeredTools['heyloey_learn'];
+    assert.ok(learnTool, 'heyloey_learn must be registered');
+
+    // Rejects title < 3 characters
+    assert.equal(learnTool.inputSchema.safeParse({ title: 'ab', fix: 'valid description here' }).success, false);
+
+    // Rejects title starting with '--'
+    assert.equal(learnTool.inputSchema.safeParse({ title: '--bad-flag', fix: 'valid description here' }).success, false);
+
+    // Rejects fix < 10 characters
+    assert.equal(learnTool.inputSchema.safeParse({ title: 'Valid Title', fix: 'short' }).success, false);
+
+    // Rejects fix starting with '--'
+    assert.equal(learnTool.inputSchema.safeParse({ title: 'Valid Title', fix: '--flag-injection-here' }).success, false);
+
+    // Rejects invalid language
+    assert.equal(learnTool.inputSchema.safeParse({ title: 'Valid Title', fix: 'valid description here', lang: 'ruby' }).success, false);
+
+    // Accepts valid inputs and defaults lang to bash
+    const parsed = learnTool.inputSchema.safeParse({ title: 'Valid Title', fix: 'valid procedural fix here' });
+    assert.equal(parsed.success, true);
+    assert.equal(parsed.data.lang, 'bash');
+
+    // Verify repository client schema parity
+    const schemaJson = JSON.parse(await fs.readFile(CLIENT_LEARN_SCHEMA, 'utf8'));
+    assert.equal(schemaJson.parameters.properties.title.minLength, 3);
+    assert.equal(schemaJson.parameters.properties.fix.minLength, 10);
+    assert.deepEqual(schemaJson.parameters.properties.lang.enum, ['bash', 'typescript', 'python', 'yaml']);
+
+    // Execution works through mock CLI
+    const res = await learnTool.handler({ title: 'Test Title', fix: 'Root cause and fix description', lang: 'typescript' });
+    assert.equal(res.isError, false);
+    const data = JSON.parse(res.content[0].text);
+    assert.equal(data.successful, true);
   } finally {
     await vault.cleanup();
   }

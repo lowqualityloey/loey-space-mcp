@@ -1,1 +1,1 @@
-External coding access: ordinary notes are read-only. Use heyloey_brief/context for orientation and heyloey_done only for completed milestones. Private/hidden paths and generic writes are unavailable. The Curator owns daily-note creation and general editing.
+External coding access: ordinary notes are read-only. Use heyloey_brief/context for orientation, heyloey_done for completed milestones, and heyloey_learn for crystallizing reusable runbooks. Private/hidden paths and generic writes are unavailable. The Curator owns daily-note creation and general editing.

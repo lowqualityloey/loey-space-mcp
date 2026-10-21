@@ -108,6 +108,10 @@ async function cliPreflight(policy,command){
   const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Pacific/Auckland',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
   const month=day.slice(0,7);
   for(const file of ['memory.md','handoff.md',`01-Daily/${month}/${day}.md`,`07-Reviews/handoff-archive-${month}.md`])await policy.resolve(file,{missing:true});
+  if(command==='learn'){
+    const devDir=path.join(policy.root,'03-Dev');
+    await policy.resolve(devDir,{directory:true,missing:true});
+  }
   if(command==='context'){
     // The CLI walks project hubs and runbooks directly; reject linked entries first.
     for(const folder of ['02-Projects','03-Dev']){
@@ -214,7 +218,7 @@ export function resolveCliPath(cliCandidate) {
 }
 
 export async function runCanonical(policy,command,args,{cli,node=process.execPath}={}){
-  if(!['brief','context','done','lock-state'].includes(command))throw Error('Unsupported canonical command');
+  if(!['brief','context','done','learn','lock-state'].includes(command))throw Error('Unsupported canonical command');
   const resolvedCli = resolveCliPath(cli);
   await cliPreflight(policy,command);
   const env={
@@ -318,7 +322,11 @@ export async function runCanonical(policy,command,args,{cli,node=process.execPat
         return;
       }
       const result=output.split(/\r?\n/).find(line=>line.startsWith('[heyloey] RESULT '))??null;
-      const successful=command==='done'?code===0&&/RESULT done (logged|already-recorded)(?: |$)/.test(result??''):code===0;
+      const successful=command==='done'
+        ? code===0&&/RESULT done (logged|already-recorded)(?: |$)/.test(result??'')
+        : command==='learn'
+        ? code===0&&output.includes('[heyloey] Crystallized procedural runbook:')
+        : code===0;
       settleResolve({exitCode:code,result,output:output.slice(0,maxOutput),truncated:output.length>maxOutput,successful});
     });
   });
@@ -330,7 +338,7 @@ export async function createServer(options={}){
     throw Error('Vault root must be explicitly configured via options.vault or LOEY_VAULT_ROOT');
   }
   const policy=await createPolicy(vaultRoot);
-  const server=new McpServer({name:'loey-space-safe',version:'1.0.0'},{instructions:'External coding access: ordinary notes are read-only. Use heyloey_brief/context for orientation and heyloey_done only for completed milestones. Private/hidden paths and generic writes are unavailable. The Curator owns daily-note creation and general editing.'});
+  const server=new McpServer({name:'loey-space-safe',version:'1.0.0'},{instructions:'External coding access: ordinary notes are read-only. Use heyloey_brief/context for orientation, heyloey_done for completed milestones, and heyloey_learn for crystallizing reusable runbooks. Private/hidden paths and generic writes are unavailable. The Curator owns daily-note creation and general editing.'});
   function tool(name,description,schema,handler,readOnly=true){
     server.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:readOnly,destructiveHint:false}},async args=>{
       try{
@@ -348,9 +356,21 @@ export async function createServer(options={}){
   tool('heyloey_brief','Get condensed context through the canonical CLI. Private Kiwi/SOUL mode is unavailable.',z.object({}).strict(),async()=>runCanonical(policy,'brief',[],options));
   tool('heyloey_context','Find project/runbook context through the canonical CLI; no arbitrary file paths or flags.',z.object({query:oneLine(300).refine(value=>!value.startsWith('--'))}).strict(),async args=>runCanonical(policy,'context',[args.query],options));
   tool('heyloey_lock_state','Inspect the canonical writer lock without writing.',z.object({}).strict(),async()=>runCanonical(policy,'lock-state',[],options));
-  server.registerTool('heyloey_done',{description:'Log one completed milestone through the canonical locked CLI. Refuses if daily note or handoff is missing; never scaffolds notes.',inputSchema:z.object({summary:oneLine(600,5).refine(value=>!value.startsWith('--'))}).strict(),annotations:{readOnlyHint:false,destructiveHint:false}},async args=>{
-    try{const result=await runCanonical(policy,'done',[args.summary],options);return {isError:!result.successful,content:[{type:'text',text:JSON.stringify(result)}]};}
+  server.registerTool('heyloey_done',{description:'Log one completed milestone through the canonical locked CLI. Refuses if daily note or handoff is missing; never scaffolds notes.',inputSchema:z.object({summary:oneLine(600,5).refine(value=>!value.startsWith('--')),scope:oneLine(80,1).regex(/^[^\[\]\r\n]+$/).optional()}).strict(),annotations:{readOnlyHint:false,destructiveHint:false}},async args=>{
+    try{
+      const finalSummary=(args.scope&&!args.summary.trim().startsWith('['))?`[${args.scope.trim()}] ${args.summary.trim()}`:args.summary;
+      const result=await runCanonical(policy,'done',[finalSummary],options);
+      return {isError:!result.successful,content:[{type:'text',text:JSON.stringify(result)}]};
+    }
     catch(error){return {isError:true,content:[{type:'text',text:error.code?'Canonical milestone operation unavailable':error.message}]};}
+  });
+  server.registerTool('heyloey_learn',{description:'Crystallize a reusable debugging fix/pattern into 03-Dev/<title>.md through the canonical locked CLI.',inputSchema:z.object({title:oneLine(120,3).refine(value=>!value.startsWith('--')),fix:z.string().trim().min(10).max(4000).regex(/^[^\x00]+$/).refine(value=>!value.startsWith('--')),lang:z.enum(['bash','typescript','python','yaml']).default('bash').optional()}).strict(),annotations:{readOnlyHint:false,destructiveHint:false}},async args=>{
+    try{
+      const lang=args.lang||'bash';
+      const result=await runCanonical(policy,'learn',[args.title,args.fix,`--lang=${lang}`],options);
+      return {isError:!result.successful,content:[{type:'text',text:JSON.stringify(result)}]};
+    }
+    catch(error){return {isError:true,content:[{type:'text',text:error.code?'Canonical learn operation unavailable':error.message}]};}
   });
   return server;
 }

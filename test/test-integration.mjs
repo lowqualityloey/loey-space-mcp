@@ -102,6 +102,72 @@ test('integration: canonical CLI live write in temporary mock vault', async () =
   }
 });
 
+test('integration: launcher-selected CLI heyloey_learn and heyloey_done with scope over stdio', {timeout: 20000}, async () => {
+  const vault = await createMockVault('loey-integration-learn-scope-');
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    !name.startsWith('LOEY_') && name !== 'FLOCK_BIN'
+  ));
+  const client = new Client({name: 'learn-scope-integration', version: '1.0.0'});
+  const transport = new StdioClientTransport({
+    command: LAUNCHER,
+    cwd: vault.root,
+    env: {
+      ...env,
+      NODE_BIN: process.execPath,
+      LOEY_VAULT_ROOT: vault.root,
+      LOEY_LOCK_DIR: path.join(vault.root, '.test-locks'),
+      LOEY_SPACE_SYNTHETIC: '0',
+    },
+    stderr: 'pipe',
+  });
+
+  try {
+    const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Pacific/Auckland', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
+    const month = today.slice(0, 7);
+    const dailyPath = path.join(vault.root, '01-Daily', month, `${today}.md`);
+    await fs.mkdir(path.dirname(dailyPath), {recursive: true});
+    await fs.writeFile(dailyPath, '# Fixture day\n\n## 📝 Daily Log\n\n> [!NOTE]- 🤖 Agent Milestone Log\n> | Time | Scope | Milestone |\n> | :--- | :--- | :--- |\n\n');
+
+    await client.connect(transport);
+
+    // 1. Test heyloey_learn over MCP
+    const learnResponse = await client.callTool({
+      name: 'heyloey_learn',
+      arguments: {
+        title: 'Stdio Learn Pattern',
+        fix: 'Root cause: sandboxed filesystem. Fix: route through MCP safely.',
+        lang: 'typescript'
+      }
+    });
+    assert.notEqual(learnResponse.isError, true, 'the MCP learn call must succeed');
+    const learnFile = path.join(vault.root, '03-Dev', 'Stdio Learn Pattern.md');
+    const learnContent = await fs.readFile(learnFile, 'utf8');
+    assert.ok(learnContent.includes('Stdio Learn Pattern'), 'runbook must have title');
+    assert.ok(learnContent.includes('language: typescript'), 'runbook must have typescript language');
+
+    // 2. Test heyloey_done with scope over MCP
+    const doneResponse = await client.callTool({
+      name: 'heyloey_done',
+      arguments: {
+        summary: 'Scope verification milestone',
+        scope: 'my-project/dev'
+      }
+    });
+    assert.notEqual(doneResponse.isError, true, 'the MCP done call with scope must succeed');
+    const dailyContent = await fs.readFile(dailyPath, 'utf8');
+    assert.ok(dailyContent.includes('Scope verification milestone'), 'daily note must have milestone');
+    assert.ok(dailyContent.includes('`my-project` (`dev`)'), 'daily note scope column must format scope');
+  } finally {
+    try {
+      await client.close();
+    } finally {
+      await vault.cleanup();
+    }
+  }
+});
+
 test('integration: launcher-selected CLI archives overflow as a classified review without losing milestones', {timeout: 20000}, async () => {
   const vault = await createMockVault('loey-integration-archive-');
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
