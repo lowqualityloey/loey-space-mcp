@@ -1,5 +1,8 @@
 # 🧠 loey-space-mcp
 
+[![CI](https://github.com/lowqualityloey/loey-space-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lowqualityloey/loey-space-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/lowqualityloey/loey-space-mcp)](LICENSE)
+
 Hardened Model Context Protocol (MCP) server providing external coding agents with safe, read-only access to `loey_space` notes and a single kernel-locked milestone mutation path.
 
 ---
