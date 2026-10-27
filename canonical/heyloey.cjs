@@ -6,16 +6,20 @@ const path = require('path');
 const { createHash } = require('crypto');
 const { execSync, spawn } = require('child_process');
 
-// --- Central-vault targeting (explicit and documented) -----------------------
+// --- Vault targeting (explicit and portable) --------------------------------
 // Precedence, in full:
-//   1. LOEY_SPACE_DIR   explicit override (documented in `heyloey` usage)
-//   2. DEFAULT_VAULT_DIR documented constant (WSL mount for the Windows host)
+//   1. LOEY_SPACE_DIR    explicit override for this CLI
+//   2. LOEY_VAULT_ROOT   the same variable the MCP launcher and server use
+//   3. ~/loey_space      portable fallback; no machine-specific path is built in
 // The resolved path AND which source produced it are reported by `status` and in
 // the machine-readable RESULT line, so a caller never has to guess where a write went.
-const DEFAULT_VAULT_DIR = '/mnt/c/Users/jonel/Documents/loey_space';
+const DEFAULT_VAULT_DIR = path.join(os.homedir(), 'loey_space');
 function resolveVaultTarget() {
   if (process.env.LOEY_SPACE_DIR) {
     return { dir: process.env.LOEY_SPACE_DIR, source: 'LOEY_SPACE_DIR' };
+  }
+  if (process.env.LOEY_VAULT_ROOT) {
+    return { dir: process.env.LOEY_VAULT_ROOT, source: 'LOEY_VAULT_ROOT' };
   }
   return { dir: DEFAULT_VAULT_DIR, source: 'default' };
 }
@@ -2572,14 +2576,16 @@ Commands:
   learn "<title>" "<fix>"    Crystallize a reusable debugging fix/pattern into 03-Dev/<title>.md (--lang=bash|ts|py)
   dream                      Run Nightly Dream Loop (auto-prune handoff.md >10 items to 07-Reviews/, carry over tasks, check rot)
   done "<msg>"               Log to today's daily note AND update handoff.md (with auto-pruning & deduplication)
+  personal "<entry>"         Owner's own entry: today's \`### 🧍 Personal Log\` only; handoff.md is never touched
   log "<msg>"                Append entry to today's daily note
   handoff "<msg>"            Update handoff.md (with auto-pruning)
   status                     Check status of daily note, handoff, and Kiwi SOUL.md
   install-hook               Install auto-logging post-commit hook into current git repo
 
 Targeting:
-  LOEY_SPACE_DIR=<dir>       Target vault. Defaults to the documented constant
-                             ${DEFAULT_VAULT_DIR}
+  LOEY_SPACE_DIR=<dir>       Target vault for this CLI. Overrides LOEY_VAULT_ROOT.
+  LOEY_VAULT_ROOT=<dir>      Fallback target; the same variable the MCP launcher uses.
+  (neither set)              Defaults to ~/loey_space (${DEFAULT_VAULT_DIR}).
   LOEY_SPACE_SYNTHETIC=1     Explicit synthetic-test opt-out: writes nothing.
                              A '.loey-synthetic' sentinel in the repo root or cwd
                              has the same effect.

@@ -6,3 +6,4 @@ backups/
 tmp/
 .loey-synthetic
 .env
+.secrets/

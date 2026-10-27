@@ -1,6 +1,8 @@
 # CLI unification plan
 
-Status: proposed; no installation or runtime changes applied.
+Status: applied. Since 27 October 2026 the installed command is a symlink to
+`canonical/heyloey.cjs`, installed by `npm run install:cli`; the pointer can be
+re-established idempotently at any time.
 Baseline: MCP commit `d6344a3`, inspected 18 October 2026.
 
 ## Outcome
@@ -14,13 +16,13 @@ and should be covered through both entry points.
 | Entry point | Current implementation | Role |
 | --- | --- | --- |
 | MCP launcher `bin/loey-space-mcp` | `canonical/heyloey.cjs` by default | Restricted agent interface |
-| Installed `~/.local/bin/heyloey` | Separate full script | Owner's CLI |
+| Installed `~/.local/bin/heyloey` | Symlink to `canonical/heyloey.cjs` (applied 27 Oct 2026) | Owner's CLI |
 | Vault `npm run heyloey` | `06-Resources/scripts/src/heyloey.ts` and generated bundle | Portable repository CLI, including dry-run and learned-note merging |
 
-The first two implementations currently compare byte-for-byte equal. The vault's
-TypeScript CLI has its own implementation and behavior; its future integration
-needs a separate command/contract inventory. A fresh vault clone must remain
-usable without a private MCP checkout.
+The installed command and the MCP launcher now resolve to the same artifact, so
+they cannot drift. The vault's TypeScript CLI has its own implementation and
+behavior; its future integration needs a separate command/contract inventory.
+A fresh vault clone must remain usable without a private MCP checkout.
 
 ## Step 1: Pin the behavior before changing installation
 
@@ -38,7 +40,7 @@ preserve every milestone under the same resolved-vault flock identity.
 
 ## Step 2: Make the installed command an owned pointer
 
-Add an idempotent installation command here that points
+Implemented as `npm run install:cli` (`tools/install-cli.mjs`), which points
 `~/.local/bin/heyloey` at this checkout's `canonical/heyloey.cjs`.
 
 - Resolve the permanent checkout path; never install a link to a temporary test
@@ -54,8 +56,10 @@ Add an idempotent installation command here that points
 - Document the single editing owner: `canonical/heyloey.cjs`. The installed
   command is an installation artifact, not a second editable source.
 
-Run installation only when the client is idle. This plan does not authorize or
-perform that installation.
+The pointer was first applied by hand on 27 October 2026 with the client idle,
+then reproduced by `npm run install:cli`: the original file and its mode are
+preserved under `~/.local/state/heyloey/backups/`, and the swap is atomic.
+Re-running the installer against the current install is a no-op.
 
 ## Step 3: Verify the installed result
 
@@ -66,6 +70,13 @@ perform that installation.
 4. Verify the owner's actual vault only with read-only `lock-state` and MCP
    initialization/tool listing. Do not add test milestones to owner records.
 5. Check that no server boundary, client root or unrelated vault file changed.
+
+Applied check (27 October 2026): both entry points resolve to the same artifact;
+the full suite passes with `LOEY_CLI_PATH` pointing at the installed symlink; and
+read-only `lock-state` confirms vault selection and `LOEY_SPACE_DIR` precedence.
+No owner records were written during verification. `test/test-install-cli.mjs`
+covers fresh install, no-op re-run, identical-file replacement, both refusal
+paths, `--force`, `--dry-run` and temporary-checkout refusal.
 
 ## Rollback
 

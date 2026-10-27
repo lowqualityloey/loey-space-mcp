@@ -29,5 +29,8 @@ jobs:
       - name: Run hermetic unit tests
         run: npm test
 
+      - name: Run installer safety tests
+        run: npm run test:install
+
       - name: Run integration tests (temporary vault)
         run: npm run test:integration
