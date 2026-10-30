@@ -586,7 +586,12 @@ function verifySectionContains(filePath, headings, needle) {
   }
   const body = sectionBody(content, headings);
   if (body === null) return { ok: false, reason: `${Array.isArray(headings) ? headings[0] : headings} section missing` };
-  if (!body.includes(needle)) return { ok: false, reason: `entry not found inside ${Array.isArray(headings) ? headings[0] : headings}` };
+  // The needle is the raw message; stored entries are escaped for markdown safety, so the
+  // unescaped body is the correct place to look (otherwise a message containing '&' or '<'
+  // would be written successfully and then reported as a failed verification).
+  if (!unescapeCell(body).includes(needle)) {
+    return { ok: false, reason: `entry not found inside ${Array.isArray(headings) ? headings[0] : headings}` };
+  }
   return { ok: true };
 }
 
@@ -909,6 +914,29 @@ function escapeCell(text) {
     .trim();
 }
 
+/**
+ * Escape text written into an INLINE markdown position (a personal bullet or a handoff
+ * entry). Table cells use escapeCell; inline text needs the same HTML safety without the
+ * pipe escaping. Without this, a milestone is escaped in the daily table but rendered as
+ * raw HTML in handoff.md.
+ */
+function escapeInlineText(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .trim();
+}
+
+/** Reverse escapeInlineText, for comparisons and post-write verification. */
+function unescapeInlineText(text) {
+  return String(text).replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+}
+
+/** Escape a literal string for use inside a RegExp source. */
+function escapeRegExpText(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function tableTime(stamp) {
   const minutes = minuteOfDay(stamp);
   if (minutes === null) return String(stamp);
@@ -947,12 +975,14 @@ function logAreaHasSummary(content, area, summary) {
   const lines = content.split(/\r?\n/);
   const body = logAreaBody(lines, area);
   if (body === null) return false;
-  const needle = unescapeCell(summary);
+  // EXACT entry comparison: a milestone must not be suppressed because its text is a
+  // substring of a different record that is already there.
+  const needle = String(summary);
   for (const line of body.split(/\r?\n/)) {
     const row = readAgentTableRow(line);
-    if (row && row.summary.includes(needle)) return true;
+    if (row && row.summary === needle) return true;
     const bullet = line.match(/^- \*\*(?:\[)?([^\]*]+?)(?:\])?\*\*(?::|\s)\s*(.*)$/);
-    if (bullet && unescapeCell(bullet[2]).includes(needle)) return true;
+    if (bullet && unescapeInlineText(bullet[2]) === needle) return true;
   }
   return false;
 }
@@ -1439,7 +1469,7 @@ function insertPersonalBullet(content, timeStr, message) {
     }
   }
   area = logAreaBounds(lines, 'personal');
-  const bullet = `- **${format12hPlain(timeStr)}**: ${cleanMessage(message)}`;
+  const bullet = `- **${format12hPlain(timeStr)}**: ${escapeInlineText(cleanMessage(message))}`;
   let insertAt = area.start + 1;
   for (let i = area.start + 1; i < area.end; i++) {
     if (!/^- \*\*(?:\[)?[^\]*]+(?:\])?\*\*(?::|\s)/.test(lines[i])) continue;
@@ -1625,12 +1655,20 @@ function updateHandoff(message, synthetic = detectSynthetic()) {
   try {
     let content = fs.readFileSync(handoffPath, 'utf8');
 
-    if (content.includes(message)) {
+    // Exact entry-line match. A milestone whose text merely appears inside another entry
+    // must still be logged. Legacy raw entries are matched as well, so switching to escaped
+    // text does not create a duplicate on the next retry.
+    const entryText = escapeInlineText(message);
+    const alreadyPattern = new RegExp(
+      `^- \\[x\\] \\*\\*\\[[^\\]]+\\]\\*\\* (?:${escapeRegExpText(entryText)}|${escapeRegExpText(message)})\\r?$`,
+      'm'
+    );
+    if (alreadyPattern.test(content)) {
       console.log(`[heyloey] ALREADY-RECORDED handoff: ${rel} (entry already present)`);
       return { status: 'already-recorded', path: rel, detail: 'entry already present' };
     }
 
-    const entry = `- [x] **[${dateStr} ${timeStr}]** ${message}`;
+    const entry = `- [x] **[${dateStr} ${timeStr}]** ${entryText}`;
 
     if (/### Latest Updates[^\n]*\n/.test(content)) {
       // Callback form: `entry` carries user text, so `$&`, `$$`, `$'`, "`$`" and `$1`
