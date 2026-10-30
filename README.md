@@ -69,7 +69,8 @@ loey-space-mcp/
 │   ├── antigravity/                 # Schemas (heyloey_done.json, read_text_file.json, etc.)
 │   └── config.example.json          # Example client configurations
 ├── src/
-│   ├── hybrid-search.mjs            # Pure-JS BM25 ranker, Porter stemmer, and synonym expansion
+│   ├── search-engine.cjs            # Single BM25/Porter/synonym engine (required by the CLI)
+│   ├── hybrid-search.mjs            # ESM re-export wrapper over the same engine
 │   └── safe-mcp.mjs                 # Hardened MCP server with note policy and canonical bridges
 ├── test/
 │   ├── helpers/
@@ -77,7 +78,10 @@ loey-space-mcp/
 │   │   └── mock-cli.cjs             # Mock CLI simulator
 │   ├── test-safe-mcp.mjs            # 20 hermetic unit and regression tests
 │   ├── test-integration.mjs         # 5 integration tests running canonical CLI in temp vault
-│   └── test-migrate-log.mjs         # 10 migrate-log separation and refusal tests
+│   ├── test-migrate-log.mjs         # 12 migrate-log separation and refusal tests
+│   ├── test-install-hook.mjs        # 3 trailer-gated post-commit hook tests
+│   ├── test-escaping-dedupe.mjs     # 3 escaping and exact-dedupe tests
+│   └── test-search-engine.mjs       # 2 engine/CLI parity tests
 ├── tools/
 │   └── install-cli.mjs              # Idempotent installer for the installed `heyloey` command
 ├── docs/
@@ -95,6 +99,10 @@ The installed `heyloey` command is an installation artifact of `canonical/heyloe
 ```bash
 npm run install:cli
 ```
+
+The canonical CLI requires the shared engine at `src/search-engine.cjs` (resolved through the
+script's real path). Keep `canonical/` and `src/` together: a copied, standalone
+`heyloey.cjs` will refuse to start rather than run without an engine.
 
 The installer links `~/.local/bin/heyloey` to this checkout's canonical CLI, so a single edit changes both the MCP bridge and the command you run by hand. It is safe to re-run:
 
