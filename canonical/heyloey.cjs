@@ -2861,34 +2861,71 @@ async function dispatch() {
   }
 
   case 'install-hook':
-  case 'hook':
+  case 'hook': {
+    const hookArgs = args.slice(1);
+    const force = hookArgs.includes('--force');
+    const unexpected = hookArgs.filter((arg) => arg !== '--force');
+    if (unexpected.length) {
+      console.error(`[heyloey] Unsupported option(s) for install-hook: ${unexpected.join(', ')}. Use --force to replace a foreign post-commit hook.`);
+      process.exit(2);
+    }
     try {
+      // `--git-path hooks` honours core.hooksPath, so a repository that configures
+      // .githooks (like loey_space itself) gets the hook where git actually runs it.
       const repoRoot = execSync('git rev-parse --show-toplevel 2>/dev/null', { encoding: 'utf8' }).trim();
       if (!repoRoot) {
         console.error('Error: Not inside a git repository.');
         process.exit(1);
       }
-      const hooksDir = path.join(repoRoot, '.git', 'hooks');
+      const hooksDir = path.resolve(repoRoot, execSync('git rev-parse --git-path hooks 2>/dev/null', { encoding: 'utf8' }).trim());
+      const hookPath = path.join(hooksDir, 'post-commit');
+      const MARKER = '# heyloey-managed';
+      // Opt-in only: the same trailer the vault's own hook uses. A commit without the
+      // trailer is a silent no-op, so this hook can never turn every commit into a
+      // milestone entry (the documented milestone-only policy).
+      const hookScript = `#!/usr/bin/env bash
+${MARKER}: logs a milestone ONLY when the commit message carries the trailer
+#     HeyLoey-Milestone: <one-line summary>
+# Managed by \`heyloey install-hook\`; re-run that command to refresh it. Nothing else is
+# ever logged: a commit without the trailer is a silent no-op here.
+set -u
+command -v heyloey >/dev/null 2>&1 || exit 0
+raw=$(git log -1 --pretty=%B 2>/dev/null) || exit 0
+summary=$(printf '%s\\n' "$raw" | awk '/^HeyLoey-Milestone:/{v=substr($0,length("HeyLoey-Milestone:")+1); sub(/^[ \\t]+/,"",v); sub(/[ \\t\\r]+$/,"",v); print v; exit}')
+summary=$(printf '%s' "\${summary:-}" | sed -e 's/^[-[:space:]]*//')
+[ -n "\${summary:-}" ] || exit 0
+if command -v timeout >/dev/null 2>&1; then
+  timeout 20 heyloey done "$summary" >/dev/null 2>&1 || true
+else
+  heyloey done "$summary" >/dev/null 2>&1 || true
+fi
+`;
+      const existing = fs.existsSync(hookPath) ? fs.readFileSync(hookPath, 'utf8') : null;
+      if (existing !== null && !existing.includes(MARKER)) {
+        if (!force) {
+          console.error(
+            `[heyloey] REFUSED install-hook: ${hookPath} already exists and was not installed by heyloey. Nothing written.\n` +
+              '[heyloey] Re-run with --force to replace it; a timestamped backup is written first.'
+          );
+          process.exit(1);
+        }
+        const backup = `${hookPath}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+        fs.copyFileSync(hookPath, backup);
+        console.log(`[heyloey] Backed up existing hook: ${backup}`);
+      }
       if (!fs.existsSync(hooksDir)) {
         fs.mkdirSync(hooksDir, { recursive: true });
       }
-      const hookPath = path.join(hooksDir, 'post-commit');
-      const hookScript = `#!/usr/bin/env bash
-# Git post-commit hook for automated loey_space daily logging
-if command -v heyloey >/dev/null 2>&1; then
-  COMMIT_MSG=$(git log -1 --pretty=%s 2>/dev/null)
-  if [ -n "$COMMIT_MSG" ]; then
-    heyloey log "$COMMIT_MSG" >/dev/null 2>&1 &
-  fi
-fi
-`;
       fs.writeFileSync(hookPath, hookScript, { encoding: 'utf8', mode: 0o755 });
-      console.log(`[heyloey] Installed post-commit hook into ${hookPath}`);
+      fs.chmodSync(hookPath, 0o755);
+      console.log(`[heyloey] Installed trailer-gated post-commit hook into ${hookPath}`);
+      console.log('[heyloey] Opt-in: add "HeyLoey-Milestone: <summary>" to a commit message. Every other commit is a no-op.');
     } catch (e) {
       console.error('Failed to install hook:', e.message);
       process.exit(1);
     }
     break;
+  }
 
   default:
     console.log(`Usage: heyloey <command> [args]
