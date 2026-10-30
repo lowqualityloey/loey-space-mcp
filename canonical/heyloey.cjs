@@ -71,6 +71,12 @@ const DONE_PERSONAL = (() => {
   return true;
 })();
 function resolveVaultTarget() {
+  // The flocked child inherits LOEY_SPACE_DIR for the resolved target, but the ORIGINAL
+  // selector is carried in LOEY_VAULT_SOURCE so `source=` names `--root` rather than the
+  // transport variable the re-exec had to use.
+  if (process.env.LOEY_LOCK_HELD === '1' && process.env.LOEY_VAULT_SOURCE) {
+    return { dir: process.env.LOEY_SPACE_DIR || DEFAULT_VAULT_DIR, source: process.env.LOEY_VAULT_SOURCE };
+  }
   if (ROOT_OVERRIDE) {
     return { dir: path.resolve(ROOT_OVERRIDE), source: '--root' };
   }
@@ -529,6 +535,7 @@ function runUnderKernelLock() {
         env: {
           ...process.env,
           LOEY_SPACE_DIR: VAULT_DIR,
+          LOEY_VAULT_SOURCE: VAULT_TARGET.source,
           LOEY_LOCK_HELD: '1',
           LOEY_LOCK_IMPL_USED: 'flock',
           ...(DONE_PERSONAL ? { LOEY_DONE_PERSONAL: '1' } : {})
@@ -699,14 +706,14 @@ function summarizeOutcome(records, synthetic) {
   return 'logged';
 }
 
-function reportOutcome(command, labelled, outcome, synthetic, extra = '') {
+function reportOutcome(command, labelled, outcome, synthetic, extra = '', prefix = '') {
   const parts = labelled.map(([name, r]) => `${name}=${r.status}`);
   // Which protocol serialized this write. Always emitted (and always `flock` for a
   // writer), so a caller - or a harness - can prove which protocol was in force
   // rather than inferring it from the absence of a warning.
   const lockImpl = LOCK_IMPL_IN_FORCE !== 'none' ? LOCK_IMPL_IN_FORCE : process.env.LOEY_LOCK_IMPL_USED || 'none';
   console.log(
-    `[heyloey] RESULT ${command} ${outcome} ${parts.join(' ')} lock=${lockImpl} target=${VAULT_DIR} source=${VAULT_TARGET.source}` +
+    `[heyloey] RESULT ${command} ${outcome} ${prefix}${parts.join(' ')} lock=${lockImpl} target=${VAULT_DIR} source=${VAULT_TARGET.source}` +
       (synthetic.synthetic ? ` synthetic=${synthetic.reason}` : '') +
       extra
   );
@@ -2616,11 +2623,15 @@ async function dispatch() {
 
     if (synthetic.synthetic) {
       console.log(`[heyloey] SKIPPED migrate-log - explicit synthetic opt-out (${synthetic.reason}); nothing written.`);
+      const lockImpl = LOCK_IMPL_IN_FORCE !== 'none' ? LOCK_IMPL_IN_FORCE : process.env.LOEY_LOCK_IMPL_USED || 'none';
+      console.log(
+        `[heyloey] RESULT migrate-log skipped migrated=0 kept=0 adopted=0 lock=${lockImpl} target=${VAULT_DIR} source=${VAULT_TARGET.source} reason=synthetic`
+      );
       process.exit(OUTCOME_EXIT.skipped);
     }
     if (!fs.existsSync(notePath)) {
       console.error(`[heyloey] REFUSED migrate-log: ${rel} is absent - ${DAILY_NOTE_HINT}; nothing written.`);
-      reportOutcome('migrate-log', [['daily', { status: 'missing', path: rel, detail: 'daily note absent' }]], 'refused', synthetic);
+      reportOutcome('migrate-log', [['daily', { status: 'missing', path: rel, detail: 'daily note absent' }]], 'refused', synthetic, ' verified=none', 'migrated=0 kept=0 adopted=0 ');
       process.exit(OUTCOME_EXIT.refused);
     }
 
@@ -2632,13 +2643,13 @@ async function dispatch() {
 
     if (!migrated.hasDailyLog) {
       console.error(`[heyloey] REFUSED migrate-log: ${rel} has no ${DAILY_LOG_HEADING} section, so there is nothing to separate. Nothing written.`);
-      reportOutcome('migrate-log', [['daily', { status: 'missing', path: rel, detail: 'daily log section absent' }]], 'refused', synthetic);
+      reportOutcome('migrate-log', [['daily', { status: 'section-missing', path: rel, detail: 'daily log section absent' }]], 'refused', synthetic, ' verified=none', 'migrated=0 kept=0 adopted=0 ');
       process.exit(OUTCOME_EXIT.refused);
     }
     if (migrated.selectionErrors.length) {
       for (const message of migrated.selectionErrors) console.error(`[heyloey] ${message}`);
       console.error('[heyloey] Nothing written. Name exactly one personal entry per --select/--select-summary; an ambiguous or unmatched selection is refused rather than guessed.');
-      reportOutcome('migrate-log', [['daily', { status: 'not-attempted', path: rel, detail: 'selection invalid' }]], 'refused', synthetic, ` migrated=0 kept=${migrated.kept.length} adopted=0 note=${rel}`);
+      reportOutcome('migrate-log', [['daily', { status: 'selection-invalid', path: rel, detail: 'selection invalid' }]], 'refused', synthetic, ' verified=none', `migrated=0 kept=${migrated.kept.length} adopted=0 `);
       process.exit(OUTCOME_EXIT.refused);
     }
 
@@ -2651,10 +2662,10 @@ async function dispatch() {
       process.exit(0);
     }
 
-    const extra = ` migrated=${migrated.moved.length} kept=${migrated.kept.length} adopted=${migrated.adopted} note=${rel} verified=daily`;
+    const counts = `migrated=${migrated.moved.length} kept=${migrated.kept.length} adopted=${migrated.adopted} `;
     if (migrated.content === original) {
       console.log(`[heyloey] ALREADY-RECORDED migrate-log: ${rel} is already separated (${migrated.moved.length} moved, ${migrated.kept.length} left in place); nothing changed.`);
-      reportOutcome('migrate-log', [['daily', { status: 'already-recorded', path: rel, detail: 'note already separated' }]], 'already-recorded', synthetic, extra);
+      reportOutcome('migrate-log', [['daily', { status: rel, path: rel, detail: 'note already separated' }]], 'already-recorded', synthetic, ' verified=daily', counts);
       process.exit(OUTCOME_EXIT['already-recorded']);
     }
 
@@ -2662,16 +2673,16 @@ async function dispatch() {
       atomicWriteFileSync(notePath, migrated.content);
     } catch (e) {
       console.error(`[heyloey] FAILED migrate-log: ${rel} - ${e.message}`);
-      reportOutcome('migrate-log', [['daily', { status: 'failed', path: rel, detail: e.message }]], 'failed', synthetic, extra);
+      reportOutcome('migrate-log', [['daily', { status: rel, path: rel, detail: e.message }]], 'failed', synthetic, ' verified=none', counts);
       process.exit(OUTCOME_EXIT.failed);
     }
     if (fs.readFileSync(notePath, 'utf8') !== migrated.content) {
       console.error(`[heyloey] FAILED migrate-log: ${rel} - post-write verification failed; the note is not as written.`);
-      reportOutcome('migrate-log', [['daily', { status: 'failed', path: rel, detail: 'post-write verification failed' }]], 'failed', synthetic, extra);
+      reportOutcome('migrate-log', [['daily', { status: rel, path: rel, detail: 'post-write verification failed' }]], 'failed', synthetic, ' verified=none', counts);
       process.exit(OUTCOME_EXIT.failed);
     }
     console.log(`[heyloey] SEPARATED ${rel}: ${migrated.moved.length} moved, ${migrated.adopted} callout(s) adopted, ${migrated.kept.length} left in place.`);
-    reportOutcome('migrate-log', [['daily', { status: 'written', path: rel, detail: 'note separated' }]], 'logged', synthetic, extra);
+    reportOutcome('migrate-log', [['daily', { status: rel, path: rel, detail: 'note separated' }]], 'logged', synthetic, ' verified=daily', counts);
     process.exit(0);
   }
 

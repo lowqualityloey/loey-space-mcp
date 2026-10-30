@@ -79,7 +79,7 @@ loey-space-mcp/
 │   │   └── mock-cli.cjs             # Mock CLI simulator
 │   ├── test-safe-mcp.mjs            # 20 hermetic unit and regression tests
 │   ├── test-integration.mjs         # 5 integration tests running canonical CLI in temp vault
-│   ├── test-migrate-log.mjs         # 12 migrate-log separation and refusal tests
+│   ├── test-migrate-log.mjs         # 16 migrate-log separation, refusal and receipt tests
 │   ├── test-install-hook.mjs        # 3 trailer-gated post-commit hook tests
 │   ├── test-escaping-dedupe.mjs     # 3 escaping and exact-dedupe tests
 │   └── test-search-engine.mjs       # 2 engine/CLI parity tests

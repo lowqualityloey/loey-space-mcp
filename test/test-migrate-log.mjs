@@ -212,3 +212,73 @@ SENTINEL
   assert.equal(result.status, 0, result.stderr);
   assert.match(areaOf(v.read(), AGENT), /shipped A &amp; B &lt;b>bold&lt;\/b>/);
 });
+
+test('migrate-log receipt keeps the vault CLI field order and names the daily path', (t) => {
+  const v = makeVault(t);
+  const result = v.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /RESULT migrate-log logged migrated=0 kept=2 adopted=0 daily=01-Daily\/2026-10\/2026-10-20\.md lock=flock target=\S+ source=LOEY_SPACE_DIR verified=daily/
+  );
+  assert.doesNotMatch(result.stdout, /note=/, 'the path belongs in daily=, not a second field');
+});
+
+test('migrate-log receipt reports --root rather than the transport env', (t) => {
+  const v = makeVault(t);
+  const env = {...process.env, LOEY_LOCK_DIR: path.join(v.root, '.locks')};
+  delete env.LOEY_SPACE_DIR;
+  delete env.LOEY_VAULT_ROOT;
+  const result = spawnSync(
+    process.execPath,
+    [CLI, '--root', v.root, 'migrate-log', '--date', '2026-10-20'],
+    {encoding: 'utf8', env}
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /source=--root verified=daily/);
+});
+
+test('migrate-log refusals keep the reason, the counts and verified=none', (t) => {
+  const absent = makeVault(t);
+  fs.rmSync(absent.note);
+  const missing = absent.run();
+  assert.equal(missing.status, 4);
+  assert.match(
+    missing.stdout,
+    /RESULT migrate-log refused migrated=0 kept=0 adopted=0 daily=missing lock=flock target=\S+ source=LOEY_SPACE_DIR verified=none/
+  );
+
+  const noSection = makeVault(t, '# Tuesday\n\n## 🌇 End of the Day\nSENTINEL\n');
+  const refused = noSection.run();
+  assert.equal(refused.status, 4);
+  assert.match(refused.stdout, /RESULT migrate-log refused migrated=0 kept=0 adopted=0 daily=section-missing .* verified=none/);
+
+  const ambiguous = makeVault(
+    t,
+    '## 📝 Daily Log\n- **10:00 AM**: first thing\n- **10:00 AM**: second thing\n'
+  );
+  const badSelection = ambiguous.run(['--select', '10:00 AM']);
+  assert.equal(badSelection.status, 4);
+  assert.match(
+    badSelection.stdout,
+    /RESULT migrate-log refused migrated=0 kept=2 adopted=0 daily=selection-invalid .* verified=none/
+  );
+});
+
+test('migrate-log skipped receipt matches the vault CLI', (t) => {
+  const v = makeVault(t);
+  const result = spawnSync(process.execPath, [CLI, 'migrate-log', '--date', '2026-10-20'], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      LOEY_SPACE_DIR: v.root,
+      LOEY_LOCK_DIR: path.join(v.root, '.locks'),
+      LOEY_SPACE_SYNTHETIC: '1',
+    },
+  });
+  assert.equal(result.status, 3);
+  assert.match(
+    result.stdout,
+    /RESULT migrate-log skipped migrated=0 kept=0 adopted=0 lock=flock target=\S+ source=LOEY_SPACE_DIR reason=synthetic/
+  );
+});
