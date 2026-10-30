@@ -103,3 +103,44 @@ shorthand that the canonical writer deliberately refuses.
 The proposed next implementation task is steps 1-3 for the two equal full CLI
 copies. Repository CLI consolidation, dependency upgrades and other enhancement
 work remain separate tasks. No commits or pushes are part of this plan.
+
+## Inventory: canonical vs repository CLI (30 October 2026)
+
+| Surface | `canonical/heyloey.cjs` | `06-Resources/scripts/src/heyloey.ts` |
+| --- | --- | --- |
+| Commands | brief, context, done, milestone, personal, learn, dream/prune, log/sync, handoff/save, status, lock-state, install-hook, migrate-log | brief, context, done, learn, personal, migrate-log, lock-state |
+| `--root <dir>` | **added 30 Oct**; wins over LOEY_SPACE_DIR / LOEY_VAULT_ROOT | supported; defaults to the working directory |
+| `--show-paths` | no | yes (relative paths by default) |
+| `--dry-run` | `migrate-log` only | every writing command, with a line-level preview |
+| `done --personal` | refused by design | supported (personal log, handoff untouched) |
+| `learn` collision | no marked-region merge | merges into a marked region instead of overwriting |
+| Default target | LOEY_SPACE_DIR → LOEY_VAULT_ROOT → `~/loey_space` | `--root`, else the working directory |
+| Output | `[heyloey]` machine lines + `RESULT` receipt | human/emoji output, relative paths |
+| Lock | kernel `flock` | kernel `flock` (same protocol) |
+
+The copies are NOT equal: the repository CLI is a distinct UX with extra flags and a
+different default target. Unification therefore chooses one surface, not just one file.
+
+### Target (recommended)
+
+`canonical/heyloey.cjs` is the only implementation. The vault keeps a **vendored copy** at
+`06-Resources/scripts/heyloey.js` generated from canonical, so a fresh clone stays portable
+without this private checkout. The TypeScript source and its bundling are retired after the
+vault's CLI tests pass against the vendored copy. Vault-only flags become canonical flags.
+
+### Remaining work before the swap
+
+1. Port `--show-paths`, global `--dry-run` (done/log/handoff/learn), and `learn` marked-region
+   merging; decide whether `done --personal` is accepted or the vault docs move to `personal`.
+2. Decide the default target: keep canonical's environment/home default (vault script passes
+   `--root .`) or adopt the working-directory default everywhere.
+3. Choose the surviving output style (canonical machine lines vs vault human/emoji).
+4. Add a parity conformance test running the same scenarios through both CLIs; it is the swap gate.
+5. Update vault tests, README/AGENTS command tables, and the post-commit call if arguments change.
+6. Retire `src/heyloey.ts` and its build wiring only once the vault suite is green.
+
+### Rollback
+
+Restore the vault files from git; the canonical additions are additive. The swap itself
+touches no vault records.
+

@@ -8,13 +8,45 @@ const { execSync, spawn } = require('child_process');
 
 // --- Vault targeting (explicit and portable) --------------------------------
 // Precedence, in full:
-//   1. LOEY_SPACE_DIR    explicit override for this CLI
-//   2. LOEY_VAULT_ROOT   the same variable the MCP launcher and server use
-//   3. ~/loey_space      portable fallback; no machine-specific path is built in
+//   1. --root <dir>      explicit per-invocation override (resolved against cwd)
+//   2. LOEY_SPACE_DIR    explicit override for this CLI
+//   3. LOEY_VAULT_ROOT   the same variable the MCP launcher and server use
+//   4. ~/loey_space      portable fallback; no machine-specific path is built in
 // The resolved path AND which source produced it are reported by `status` and in
 // the machine-readable RESULT line, so a caller never has to guess where a write went.
+//
+// The flag is consumed HERE, before any command parsing, so it is accepted before or
+// after the command and can never be mistaken for message text.
 const DEFAULT_VAULT_DIR = path.join(os.homedir(), 'loey_space');
+const ROOT_OVERRIDE = (() => {
+  const argv = process.argv;
+  for (let index = 2; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--root') {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith('--')) {
+        console.error('[heyloey] --root requires a directory. Nothing written.');
+        process.exit(2);
+      }
+      argv.splice(index, 2);
+      return value;
+    }
+    if (arg.startsWith('--root=')) {
+      const value = arg.slice('--root='.length);
+      argv.splice(index, 1);
+      if (!value) {
+        console.error('[heyloey] --root requires a directory. Nothing written.');
+        process.exit(2);
+      }
+      return value;
+    }
+  }
+  return null;
+})();
 function resolveVaultTarget() {
+  if (ROOT_OVERRIDE) {
+    return { dir: path.resolve(ROOT_OVERRIDE), source: '--root' };
+  }
   if (process.env.LOEY_SPACE_DIR) {
     return { dir: process.env.LOEY_SPACE_DIR, source: 'LOEY_SPACE_DIR' };
   }
@@ -462,7 +494,13 @@ function runUnderKernelLock() {
     const child = spawn(
       bin,
       ['-w', String(secs), '-E', String(OUTCOME_EXIT['lock-contended']), p, process.execPath, __filename, ...process.argv.slice(2)],
-      { stdio: 'inherit', detached: true, env: { ...process.env, LOEY_LOCK_HELD: '1', LOEY_LOCK_IMPL_USED: 'flock' } }
+      {
+        stdio: 'inherit',
+        detached: true,
+        // Pin the resolved target for the flocked child. A --root override has already been
+        // consumed from argv, so without this the child could resolve a different vault.
+        env: { ...process.env, LOEY_SPACE_DIR: VAULT_DIR, LOEY_LOCK_HELD: '1', LOEY_LOCK_IMPL_USED: 'flock' }
+      }
     );
     // `flock` FORKS: the command it runs is a GRANDCHILD of this process. Signalling
     // flock alone would kill the lock holder and orphan the writer, which would keep
@@ -2584,6 +2622,8 @@ Commands:
                              only when named with --select or --select-summary.
 
 Targeting:
+  --root <dir>               Target vault for this invocation. Wins over the environment.
+                             Relative values resolve against the working directory.
   LOEY_SPACE_DIR=<dir>       Target vault for this CLI. Overrides LOEY_VAULT_ROOT.
   LOEY_VAULT_ROOT=<dir>      Fallback target; the same variable the MCP launcher uses.
   (neither set)              Defaults to ~/loey_space (${DEFAULT_VAULT_DIR}).
