@@ -144,3 +144,14 @@ vault's CLI tests pass against the vendored copy. Vault-only flags become canoni
 Restore the vault files from git; the canonical additions are additive. The swap itself
 touches no vault records.
 
+
+### Progress (30 October 2026)
+
+Landed on canonical: `--root`, global `--dry-run` for every writing command, `--show-paths`
+(preview paths), `done --personal` (propagated into the flocked child), and `learn` merging
+into a marked region instead of overwriting. Covered by `test/test-cli-root.mjs` and
+`test/test-dry-run.mjs`; suite is 60 tests.
+
+Still open before the swap: the default-target difference (the vault npm script must pass
+`--root .`), a parity conformance run of the vault's own CLI tests against the vendored
+canonical copy, and the retirement of `src/heyloey.ts` (needs explicit scoped confirmation).

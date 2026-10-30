@@ -44,6 +44,9 @@ jobs:
       - name: Run --root targeting tests
         run: npm run test:root
 
+      - name: Run dry-run and learn-merge tests
+        run: npm run test:dry-run
+
       - name: Run migrate-log regression tests
         run: npm run test:migrate
 

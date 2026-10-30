@@ -72,3 +72,20 @@ test('the canonical CLI resolves the shared engine when invoked through a symlin
     await vault.cleanup();
   }
 });
+
+test('a vendored single-directory copy resolves ./src/search-engine.cjs', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'loey-vendored-'));
+  const vaultDir = path.join(dir, 'vault');
+  try {
+    await fs.mkdir(vaultDir, {recursive: true});
+    await fs.mkdir(path.join(dir, 'tool', 'src'), {recursive: true});
+    await fs.copyFile(CANONICAL_CLI, path.join(dir, 'tool', 'heyloey.cjs'));
+    await fs.copyFile(path.join(__dirname, '../src/search-engine.cjs'), path.join(dir, 'tool', 'src', 'search-engine.cjs'));
+
+    const result = spawnSync(process.execPath, [path.join(dir, 'tool', 'heyloey.cjs'), '--root', vaultDir, 'status'], {encoding: 'utf8'});
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes('source: --root'));
+  } finally {
+    await fs.rm(dir, {recursive: true, force: true});
+  }
+});

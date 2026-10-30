@@ -43,6 +43,33 @@ const ROOT_OVERRIDE = (() => {
   }
   return null;
 })();
+
+// Global planning/output flags, consumed the same way as --root so they are accepted
+// before or after the command and can never become message text.
+const DRY_RUN = (() => {
+  const at = process.argv.indexOf('--dry-run');
+  if (at === -1) return false;
+  process.argv.splice(at, 1);
+  return true;
+})();
+const SHOW_PATHS = (() => {
+  const at = process.argv.indexOf('--show-paths');
+  if (at === -1) return false;
+  process.argv.splice(at, 1);
+  return true;
+})();
+// `done --personal` is the repository CLI's shorthand for the owner-entry path: the entry
+// lands under the Personal Log and handoff.md is never touched. Accepted only on `done`.
+const DONE_PERSONAL = (() => {
+  // The flocked child re-execs without the consumed flag, so the parent marks it here.
+  if (process.env.LOEY_DONE_PERSONAL === '1') return true;
+  const argv = process.argv;
+  if (argv[2] !== 'done') return false;
+  const at = argv.indexOf('--personal', 3);
+  if (at === -1) return false;
+  argv.splice(at, 1);
+  return true;
+})();
 function resolveVaultTarget() {
   if (ROOT_OVERRIDE) {
     return { dir: path.resolve(ROOT_OVERRIDE), source: '--root' };
@@ -499,7 +526,13 @@ function runUnderKernelLock() {
         detached: true,
         // Pin the resolved target for the flocked child. A --root override has already been
         // consumed from argv, so without this the child could resolve a different vault.
-        env: { ...process.env, LOEY_SPACE_DIR: VAULT_DIR, LOEY_LOCK_HELD: '1', LOEY_LOCK_IMPL_USED: 'flock' }
+        env: {
+          ...process.env,
+          LOEY_SPACE_DIR: VAULT_DIR,
+          LOEY_LOCK_HELD: '1',
+          LOEY_LOCK_IMPL_USED: 'flock',
+          ...(DONE_PERSONAL ? { LOEY_DONE_PERSONAL: '1' } : {})
+        }
       }
     );
     // `flock` FORKS: the command it runs is a GRANDCHILD of this process. Signalling
@@ -973,6 +1006,16 @@ function unescapeInlineText(text) {
 /** Escape a literal string for use inside a RegExp source. */
 function escapeRegExpText(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Whether handoff.md already carries this exact milestone entry (any timestamp). */
+function handoffHasEntry(content, message) {
+  const entryText = escapeInlineText(message);
+  const pattern = new RegExp(
+    `^- \\[x\\] \\*\\*\\[[^\\]]+\\]\\*\\* (?:${escapeRegExpText(entryText)}|${escapeRegExpText(message)})\\r?$`,
+    'm'
+  );
+  return pattern.test(content);
 }
 
 function tableTime(stamp) {
@@ -1697,11 +1740,7 @@ function updateHandoff(message, synthetic = detectSynthetic()) {
     // must still be logged. Legacy raw entries are matched as well, so switching to escaped
     // text does not create a duplicate on the next retry.
     const entryText = escapeInlineText(message);
-    const alreadyPattern = new RegExp(
-      `^- \\[x\\] \\*\\*\\[[^\\]]+\\]\\*\\* (?:${escapeRegExpText(entryText)}|${escapeRegExpText(message)})\\r?$`,
-      'm'
-    );
-    if (alreadyPattern.test(content)) {
+    if (handoffHasEntry(content, message)) {
       console.log(`[heyloey] ALREADY-RECORDED handoff: ${rel} (entry already present)`);
       return { status: 'already-recorded', path: rel, detail: 'entry already present' };
     }
@@ -1951,13 +1990,23 @@ function generateBrief(includeKiwiSoul = false) {
 // pass against code the CLI never ran. Keep it in src/search-engine.cjs and require it.
 // Resolve through the script's REAL path: the supported install is a symlink
 // (~/.local/bin/heyloey -> canonical/heyloey.cjs), so __dirname alone can point at the
-// symlink's directory and the engine would not be found.
-const SEARCH_ENGINE_PATH = path.join(path.dirname(fs.realpathSync(__filename)), '..', 'src', 'search-engine.cjs');
-let searchEngine;
-try {
-  searchEngine = require(SEARCH_ENGINE_PATH);
-} catch (e) {
-  console.error('[heyloey] Missing search engine module: src/search-engine.cjs must sit beside canonical/.');
+// symlink's directory and the engine would not be found. Two layouts are supported:
+// the repository checkout (../src/search-engine.cjs) and a vendored single-directory
+// copy such as a vault bundle (./src/search-engine.cjs).
+const SCRIPT_REAL_DIR = path.dirname(fs.realpathSync(__filename));
+const SEARCH_ENGINE_CANDIDATES = [
+  path.join(SCRIPT_REAL_DIR, '..', 'src', 'search-engine.cjs'),
+  path.join(SCRIPT_REAL_DIR, 'src', 'search-engine.cjs')
+];
+let searchEngine = null;
+for (const candidate of SEARCH_ENGINE_CANDIDATES) {
+  try {
+    searchEngine = require(candidate);
+    break;
+  } catch (_) {}
+}
+if (!searchEngine) {
+  console.error('[heyloey] Missing search engine module: expected ../src/search-engine.cjs or ./src/search-engine.cjs beside the CLI.');
   process.exit(OUTCOME_EXIT.failed);
 }
 
@@ -2046,6 +2095,58 @@ function routeContextWithLaya(queryStr) {
   return out.join('\n');
 }
 
+const LEARN_START = '<!-- heyloey-learn:start -->';
+const LEARN_END = '<!-- heyloey-learn:end -->';
+
+/** The generated payload, wrapped in markers so a repeat can be recognised and replaced. */
+function buildLearnNote(safeTitle, bodyRaw, dateStr, langOpt, topicTag) {
+  const gitContext = getGitContext().trim() || 'global';
+  const core = [
+    '---',
+    'created: ' + dateStr,
+    'updated: ' + dateStr,
+    'type: snippet',
+    'area: dev',
+    'status: active',
+    'language: ' + langOpt,
+    'source: heyloey-learn',
+    'tags:',
+    '  - type/snippet',
+    '  - area/dev',
+    '  - status/active',
+    '  - topic/' + topicTag,
+    '---',
+    '',
+    '# 💻 ' + safeTitle,
+    '',
+    LEARN_START,
+    '> **' + bodyRaw + '**',
+    '',
+    '---',
+    '',
+    '## 🔍 Root Cause & Procedural Fix',
+    '- ' + bodyRaw,
+    '- Captured from repository context: `' + gitContext + '` on ' + dateStr + '.',
+    LEARN_END,
+    ''
+  ].join('\n');
+  return core + '\n---\n\n## 🔗 Related Resources & Notes\n- [[03-Dev/_Dev MOC|_Dev MOC]]\n';
+}
+
+/** Merge a regenerated pattern into a note without replacing hand-written content. */
+function mergeLearnNote(existing, core, bodyRaw) {
+  const region = new RegExp(escapeRegExpText(LEARN_START) + '[\\s\\S]*?' + escapeRegExpText(LEARN_END));
+  const match = existing.match(region);
+  if (match) {
+    if (match[0].includes(bodyRaw)) return { content: existing, action: 'unchanged' };
+    const replacement = core.slice(core.indexOf(LEARN_START), core.indexOf(LEARN_END) + LEARN_END.length);
+    return { content: existing.replace(region, () => replacement), action: 'merged' };
+  }
+  if (existing.includes(bodyRaw)) return { content: existing, action: 'unchanged' };
+  const block = core.slice(core.indexOf(LEARN_START), core.indexOf(LEARN_END) + LEARN_END.length);
+  return { content: existing.trimEnd() + '\n\n---\n\n' + block + '\n', action: 'merged' };
+}
+
 function crystallizeSkill(titleRaw, bodyRaw, langOpt = 'bash') {
   const { dateStr } = getTodayInfo();
   const safeTitle = titleRaw.replace(/[\/\\:*?"<>|]/g, '-').trim();
@@ -2053,43 +2154,25 @@ function crystallizeSkill(titleRaw, bodyRaw, langOpt = 'bash') {
   if (!fs.existsSync(devDir)) {
     fs.mkdirSync(devDir, { recursive: true });
   }
-  const filePath = path.join(devDir, `${safeTitle}.md`);
+  const filePath = path.join(devDir, safeTitle + '.md');
   const topicTag = safeTitle.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2)[0] || 'debugging';
+  const core = buildLearnNote(safeTitle, bodyRaw, dateStr, langOpt, topicTag);
 
-  const noteContent = `---
-created: ${dateStr}
-updated: ${dateStr}
-type: snippet
-area: dev
-status: active
-language: ${langOpt}
-source: heyloey-learn
-tags:
-  - type/snippet
-  - area/dev
-  - status/active
-  - topic/${topicTag}
----
-
-# 💻 ${safeTitle}
-
-> **${bodyRaw}**
-
----
-
-## 🔍 Root Cause & Procedural Fix
-- ${bodyRaw}
-- Captured from repository context: \`${getGitContext().trim() || 'global'}\` on ${dateStr}.
-
----
-
-## 🔗 Related Resources & Notes
-- [[03-Dev/_Dev MOC|_Dev MOC]]
-`;
-
-  atomicWriteFileSync(filePath, noteContent);
-  console.log(`[heyloey] Crystallized procedural runbook: 03-Dev/${safeTitle}.md`);
-  logToDailyNote(`[learn] Crystallized procedural runbook into 03-Dev/${safeTitle}.md`);
+  let content = core;
+  let action = 'created';
+  if (fs.existsSync(filePath)) {
+    const merged = mergeLearnNote(fs.readFileSync(filePath, 'utf8'), core, bodyRaw);
+    if (merged.action === 'unchanged') {
+      console.log('[heyloey] Crystallized procedural runbook: 03-Dev/' + safeTitle + '.md (already recorded, nothing changed)');
+      return { status: 'already-recorded', path: '03-Dev/' + safeTitle + '.md', action: 'unchanged' };
+    }
+    content = merged.content;
+    action = 'merged';
+  }
+  atomicWriteFileSync(filePath, content);
+  console.log('[heyloey] Crystallized procedural runbook: 03-Dev/' + safeTitle + '.md (' + action + ')');
+  logToDailyNote('[learn] Crystallized procedural runbook into 03-Dev/' + safeTitle + '.md');
+  return { status: 'written', path: '03-Dev/' + safeTitle + '.md', action };
 }
 
 function runDreamLoop() {
@@ -2193,8 +2276,132 @@ if (['done', 'milestone', 'personal'].includes(command)) {
 // repository's own .git/hooks, not into vault records.
 const WRITER_COMMANDS = new Set(['done', 'milestone', 'personal', 'log', 'sync', 'handoff', 'save', 'learn', 'snippet', 'dream', 'prune', 'migrate-log']);
 
+function dryRunTarget(absolutePath) {
+  return SHOW_PATHS ? absolutePath : (path.relative(VAULT_DIR, absolutePath) || '.');
+}
+
+/** Preview a writing command without taking the lock or touching a record. */
+function runDryRun() {
+  const { dateStr, monthDir, timeStr } = getTodayInfo();
+  const dailyPath = dailyNotePath(dateStr, monthDir);
+  const handoffPath = path.join(VAULT_DIR, 'handoff.md');
+  const say = (line) => console.log(line);
+  const header = (label) => say('[heyloey] DRY RUN - nothing written. Vault: ' + dryRunTarget(VAULT_DIR) + ' (' + label + ')');
+  const requireFile = (file, label) => {
+    if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8');
+    console.error('[heyloey] REFUSED ' + label + ': ' + vaultRel(file) + ' is absent - ' + DAILY_NOTE_HINT + '; nothing written.');
+    process.exit(OUTCOME_EXIT.refused);
+  };
+  const requireMessage = () => {
+    if (!rawMessage || rawMessage.length < 5) {
+      console.error('Error: Message must be at least 5 characters.');
+      process.exit(1);
+    }
+  };
+
+  switch (command) {
+    case 'done':
+    case 'milestone': {
+      requireMessage();
+      const daily = requireFile(dailyPath, 'daily note');
+      if (DONE_PERSONAL) {
+        const entry = cleanMessage(rawMessage);
+        header(LOG_AREA_HEADINGS.personal);
+        say('   ' + dryRunTarget(dailyPath) + ' [' + LOG_AREA_HEADINGS.personal + ']');
+        if (logAreaHasSummary(daily, 'personal', entry)) say('   (already recorded)');
+        else say('   + - **' + format12hPlain(timeStr) + '**: ' + escapeInlineText(entry));
+        process.exit(0);
+      }
+      const handoff = requireFile(handoffPath, 'handoff');
+      const split = splitScopeAndSummary(formattedMessage);
+      const needle = split.summary.length > 0 ? split.summary : formattedMessage;
+      header(LOG_AREA_HEADINGS.agent);
+      say('   ' + dryRunTarget(dailyPath) + ' [' + LOG_AREA_HEADINGS.agent + ']');
+      if (logAreaHasSummary(daily, 'agent', needle)) say('   (already recorded)');
+      else say('   + | ' + format12hNbsp(timeStr) + ' | ' + (split.scope ? escapeCell(split.scope) : '') + ' | ' + escapeCell(split.summary) + ' |');
+      say('   ' + dryRunTarget(handoffPath) + ' [### Latest Updates]');
+      if (handoffHasEntry(handoff, formattedMessage)) say('   (already recorded)');
+      else say('   + - [x] **[' + dateStr + ' ' + timeStr + ']** ' + escapeInlineText(formattedMessage));
+      process.exit(0);
+    }
+    case 'personal': {
+      requireMessage();
+      const daily = requireFile(dailyPath, 'daily note');
+      const entry = cleanMessage(rawMessage);
+      header(LOG_AREA_HEADINGS.personal);
+      say('   ' + dryRunTarget(dailyPath) + ' [' + LOG_AREA_HEADINGS.personal + ']');
+      if (logAreaHasSummary(daily, 'personal', entry)) say('   (already recorded)');
+      else say('   + - **' + format12hPlain(timeStr) + '**: ' + escapeInlineText(entry));
+      process.exit(0);
+    }
+    case 'log':
+    case 'sync': {
+      requireMessage();
+      const daily = requireFile(dailyPath, 'daily note');
+      const split = splitScopeAndSummary(formattedMessage);
+      const needle = split.summary.length > 0 ? split.summary : formattedMessage;
+      header(LOG_AREA_HEADINGS.agent);
+      say('   ' + dryRunTarget(dailyPath) + ' [' + LOG_AREA_HEADINGS.agent + ']');
+      if (logAreaHasSummary(daily, 'agent', needle)) say('   (already recorded)');
+      else say('   + | ' + format12hNbsp(timeStr) + ' | ' + (split.scope ? escapeCell(split.scope) : '') + ' | ' + escapeCell(split.summary) + ' |');
+      process.exit(0);
+    }
+    case 'handoff':
+    case 'save': {
+      requireMessage();
+      const handoff = requireFile(handoffPath, 'handoff');
+      header('### Latest Updates');
+      say('   ' + dryRunTarget(handoffPath) + ' [### Latest Updates]');
+      if (handoffHasEntry(handoff, formattedMessage)) say('   (already recorded)');
+      else say('   + - [x] **[' + dateStr + ' ' + timeStr + ']** ' + escapeInlineText(formattedMessage));
+      process.exit(0);
+    }
+    case 'learn':
+    case 'snippet': {
+      const nonFlagArgs = args.slice(1).filter((arg) => !arg.startsWith('--'));
+      const title = nonFlagArgs[0];
+      const fix = nonFlagArgs.slice(1).join(' ').trim();
+      if (!title || !fix) {
+        console.error('Usage: heyloey learn "<Title>" "<Root cause & reusable fix>" [--lang=typescript|bash|python]');
+        process.exit(1);
+      }
+      const langFlag = args.find((arg) => arg.startsWith('--lang='));
+      const lang = langFlag ? langFlag.split('=')[1] : 'bash';
+      const safeTitle = title.replace(/[\/\\:*?"<>|]/g, '-').trim();
+      const topicTag = safeTitle.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2)[0] || 'debugging';
+      const target = path.join(VAULT_DIR, '03-Dev', safeTitle + '.md');
+      const core = buildLearnNote(safeTitle, fix, dateStr, lang, topicTag);
+      let plan = 'would create';
+      if (fs.existsSync(target)) {
+        const merged = mergeLearnNote(fs.readFileSync(target, 'utf8'), core, fix);
+        plan = merged.action === 'unchanged' ? 'already recorded; nothing would change' : 'would merge into the marked region';
+      }
+      header('03-Dev');
+      say('   ' + dryRunTarget(target) + ' (' + plan + ')');
+      process.exit(0);
+    }
+    case 'dream':
+    case 'prune': {
+      header('handoff.md');
+      say('   would prune handoff overflow into 07-Reviews/ and carry unfinished tasks forward');
+      process.exit(0);
+    }
+    default:
+      console.error('[heyloey] --dry-run is not implemented for ' + command + '. Nothing written.');
+      process.exit(2);
+  }
+}
+
 async function dispatch() {
-  if (WRITER_COMMANDS.has(command)) {
+  if (DRY_RUN) {
+    if (!WRITER_COMMANDS.has(command)) {
+      console.error(`[heyloey] --dry-run applies to writing commands only; ${command} writes nothing.`);
+      process.exit(2);
+    }
+    // migrate-log prints its own dry-run report; every other writer previews here.
+    // Neither path takes the lock or touches a record.
+    if (command !== 'migrate-log' && command !== 'migrate') runDryRun();
+  } else if (WRITER_COMMANDS.has(command)) {
     // Refuse BEFORE the lock and before any read of a record. A configuration that
     // names the removed tier is an error, never a hint to select something else.
     const obsolete = obsoleteLockConfig();
@@ -2275,6 +2482,22 @@ async function dispatch() {
     if (!formattedMessage || rawMessage.length < 5) {
       console.error('Error: Message must be at least 5 characters.');
       process.exit(1);
+    }
+    if (DONE_PERSONAL) {
+      // `done --personal` is the owner-entry shorthand: Personal Log only, never handoff.md.
+      const synthetic = detectSynthetic();
+      const daily = logToPersonal(rawMessage, synthetic);
+      const outcome =
+        daily.status === 'written' ? 'logged' :
+        daily.status === 'already-recorded' ? 'already-recorded' :
+        daily.status === 'missing' ? 'refused' : daily.status;
+      reportOutcome(
+        'done',
+        [['daily', daily], ['handoff', { status: 'not-attempted', path: 'handoff.md', detail: 'done --personal never enters handoff' }]],
+        outcome,
+        synthetic
+      );
+      process.exit(OUTCOME_EXIT[outcome]);
     }
     const synthetic = detectSynthetic();
     const { dateStr, monthDir } = getTodayInfo();
@@ -2419,8 +2642,8 @@ async function dispatch() {
       process.exit(OUTCOME_EXIT.refused);
     }
 
-    if (parsed.dryRun) {
-      console.log(`[heyloey] DRY RUN - nothing written. Vault: ${VAULT_DIR}`);
+    if (parsed.dryRun || DRY_RUN) {
+      console.log(`[heyloey] DRY RUN - nothing written. Vault: ${SHOW_PATHS ? VAULT_DIR : '.'}`);
       console.log(`[heyloey]   ${rel} [${LOG_AREA_HEADINGS.personal} -> ${LOG_AREA_HEADINGS.agent}]`);
       for (const summary of migrated.moved) console.log(`[heyloey]     -> ${summary}`);
       if (migrated.adopted > 0) console.log(`[heyloey]     => ${migrated.adopted} legacy callout(s) adopted by the agent area`);
@@ -2624,6 +2847,10 @@ Commands:
 Targeting:
   --root <dir>               Target vault for this invocation. Wins over the environment.
                              Relative values resolve against the working directory.
+  --dry-run                  With a writing command: print the lines that would be written and
+                             write nothing (takes no lock).
+  --show-paths               Print absolute paths in diagnostics; output is relative by default.
+  --personal                 With done: write under ### 🧍 Personal Log and skip handoff.md.
   LOEY_SPACE_DIR=<dir>       Target vault for this CLI. Overrides LOEY_VAULT_ROOT.
   LOEY_VAULT_ROOT=<dir>      Fallback target; the same variable the MCP launcher uses.
   (neither set)              Defaults to ~/loey_space (${DEFAULT_VAULT_DIR}).
