@@ -10,7 +10,8 @@
     "test": "node --test test/test-safe-mcp.mjs",
     "test:integration": "node --test test/test-integration.mjs",
     "test:install": "node --test test/test-install-cli.mjs",
-    "test:all": "node --test test/test-safe-mcp.mjs test/test-integration.mjs test/test-install-cli.mjs"
+    "test:migrate": "node --test test/test-migrate-log.mjs",
+    "test:all": "node --test test/test-safe-mcp.mjs test/test-integration.mjs test/test-install-cli.mjs test/test-migrate-log.mjs"
   },
   "engines": {
     "node": ">=20"

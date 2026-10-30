@@ -741,13 +741,14 @@ function insertHeading(lines, at, heading) {
   return at + block.length - 1;
 }
 
-/** Create an area heading when it is absent, in canonical order; existing entries never move. */
 function ensureLogArea(lines, area) {
   const existing = logAreaBounds(lines, area);
   if (existing) return existing.start;
   const parent = dailyLogBounds(lines);
   if (!parent) return null;
   const heading = LOG_AREA_HEADINGS[area];
+  const callout = findAreaCallout(lines, area, parent.start + 1, parent.end);
+  if (callout !== -1) return insertHeading(lines, callout, heading);
   if (area === 'personal') {
     let at = parent.start + 1;
     while (at < parent.end && (lines[at].trim() === '' || lines[at].trim().startsWith('>'))) at++;
@@ -896,11 +897,16 @@ function tableCellsOf(line) {
 }
 
 function unescapeCell(cell) {
-  return String(cell).replace(/\\\|/g, '|').trim();
+  return String(cell).replace(/\\\|/g, '|').replace(/&lt;/g, '<').replace(/&amp;/g, '&').trim();
 }
 
 function escapeCell(text) {
-  return String(text).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/\|/g, '\\|')
+    .replace(/<(?!br\s*\/?>)(?=[a-zA-Z/])/gi, '&lt;')
+    .replace(/\r?\n/g, ' ')
+    .trim();
 }
 
 function tableTime(stamp) {
@@ -964,6 +970,65 @@ function agentCalloutLabel(count) {
 
 const AGENT_CALLOUT = /^> \[!NOTE\]-\s*🤖\s*Show entries/;
 const LEGACY_AGENT_CALLOUT = /^> \[!NOTE\]-\s*🤖 Agent Milestone Log/;
+
+/** The callout a logging tool already writes for each area, wherever an older write left it. */
+const AREA_CALLOUT = {
+  personal: /^> \[!NOTE\]-\s*🧍/,
+  agent: /^> \[!NOTE\]-\s*🤖(?:\s+Show entries|\s+Agent Milestone Log)/,
+  github: /^> \[!NOTE\]-\s*🐙 GitHub Activity Log/
+};
+
+/** The first index of an area's own callout inside [from, to), or -1. */
+function findAreaCallout(lines, area, from, to) {
+  for (let i = from; i < to; i += 1) if (AREA_CALLOUT[area].test(lines[i].trim())) return i;
+  return -1;
+}
+
+/** A callout block: its header line, every quoted line under it, and one trailing blank line. */
+function calloutBlockEnd(lines, start, limit) {
+  let end = start + 1;
+  while (end < limit && /^\s*>/.test(lines[end])) end += 1;
+  if (end < limit && lines[end].trim() === '') end += 1;
+  return end;
+}
+
+/**
+ * Move an area's own callout under its heading when an earlier write left it in another area.
+ * A positional move only: not one of its lines is rewritten.
+ */
+function adoptAreaCallout(lines, area) {
+  const parent = dailyLogBounds(lines);
+  if (!parent) return false;
+  const heading = logAreaBounds(lines, area);
+  if (!heading) return false;
+  const start = findAreaCallout(lines, area, parent.start + 1, parent.end);
+  if (start === -1) return false;
+  if (start > heading.start && start < heading.end) return false;
+  const block = lines.splice(start, calloutBlockEnd(lines, start, parent.end) - start);
+  while (block.length > 1 && block[block.length - 1].trim() === '') block.pop();
+  const target = logAreaBounds(lines, area);
+  if (!target) return false;
+  let at = target.end;
+  while (at > target.start + 1 && lines[at - 1].trim() === '') at -= 1;
+  const insert = [...block];
+  if (at > 0 && lines[at - 1].trim() !== '') insert.unshift('');
+  if (lines[at] !== undefined && lines[at].trim() !== '') insert.push('');
+  lines.splice(at, 0, ...insert);
+  return true;
+}
+
+/** Give every callout already present the area heading it belongs under; returns how many moved. */
+function adoptCalloutAreas(lines) {
+  let adopted = 0;
+  for (const area of LOG_AREA_ORDER) {
+    const parent = dailyLogBounds(lines);
+    if (!parent) break;
+    if (findAreaCallout(lines, area, parent.start + 1, parent.end) === -1) continue;
+    if (!logAreaBounds(lines, area)) ensureLogArea(lines, area);
+    if (adoptAreaCallout(lines, area)) adopted += 1;
+  }
+  return adopted;
+}
 
 function quoted(line) {
   return `> ${line}`;
@@ -1041,18 +1106,23 @@ function sortAgentTable(lines) {
 }
 
 /** Append rows to the area's one table, creating the collapsible container when it is absent. */
-function appendAgentRows(lines, rows) {
+function appendAgentRows(lines, rows, preferredAt = -1) {
   ensureLogArea(lines, 'agent');
   let area = logAreaBounds(lines, 'agent');
   if (!area) return;
   let container = findAgentContainer(lines);
 
   if (container.start === -1) {
-    const at = area.start + 1;
+    const anchor = preferredAt > area.start && preferredAt < area.end ? preferredAt : area.start + 1;
     const block = [agentCalloutLabel(rows.length), ...AGENT_TABLE_HEADER.map(quoted), ...rows.map(quoted)];
-    if (lines[at] !== undefined && lines[at].trim() !== '') block.unshift('');
-    if (lines[at] !== undefined) block.push('');
-    lines.splice(at, 0, ...block);
+    if (anchor > 0 && lines[anchor - 1].trim() !== '') block.unshift('');
+    lines.splice(anchor, 0, ...block);
+    // Exactly one blank line after the container, whatever spacing the line it displaced left.
+    let after = anchor + block.length;
+    while (after < lines.length && lines[after].trim() === '') after += 1;
+    const blanks = after - (anchor + block.length);
+    if (blanks === 0) lines.splice(after, 0, '');
+    else if (blanks > 1) lines.splice(anchor + block.length, blanks - 1);
   } else if (container.header === -1) {
     lines.splice(container.start + 1, 0, ...AGENT_TABLE_HEADER.map(quoted), ...rows.map(quoted));
   } else {
@@ -1065,7 +1135,7 @@ function appendAgentRows(lines, rows) {
 
   area = logAreaBounds(lines, 'agent');
   container = findAgentContainer(lines);
-  if (container.start !== -1) {
+  if (container.start !== -1 && area) {
     lines[container.start] = agentCalloutLabel(countAgentRows(lines, container));
     if (container.end < area.end && lines[container.end] && lines[container.end].trim() !== '') {
       lines.splice(container.end, 0, '');
@@ -1074,28 +1144,6 @@ function appendAgentRows(lines, rows) {
   sortAgentTable(lines);
 }
 
-/**
- * Fold a legacy `🤖 Agent Milestone Log` callout — wherever an earlier writer left it — into the
- * area's one collapsible container. The old label is discarded: only `🤖 Show entries (N)` is
- * written from now on, and its rows are appended to the table that already exists when there is one.
- */
-function adoptAgentCallout(lines) {
-  const start = lines.findIndex((line) => LEGACY_AGENT_CALLOUT.test(line.trim()));
-  if (start < 0) return 0;
-  let end = start;
-  while (end < lines.length && /^>/.test(lines[end].trim())) end++;
-  const rows = [];
-  for (let i = start + 1; i < end; i++) {
-    const row = readAgentTableRow(lines[i]);
-    if (row) rows.push(`| ${tableTime(row.stamp)} | ${row.scope ? escapeCell(row.scope) : ''} | ${escapeCell(row.summary)} |`);
-  }
-  if (end < lines.length && lines[end].trim() === '') end++;
-  lines.splice(start, end - start);
-  if (!rows.length) return 0;
-  ensureLogArea(lines, 'agent');
-  appendAgentRows(lines, rows);
-  return 1;
-}
 
 /**
  * Convert the agent area's previous representations into rows: timestamped bullets and the plain
@@ -1106,6 +1154,7 @@ function convertAgentAreaBullets(lines) {
   if (!area) return 0;
   const rows = [];
   const remove = [];
+  let anchor = -1;
   // Everything the one container already holds is that container's business: it is current format,
   // and re-reading it here would duplicate rows and strand a separator line.
   const container = findAgentContainer(lines);
@@ -1115,14 +1164,29 @@ function convertAgentAreaBullets(lines) {
       i = container.end - 1;
       continue;
     }
+    if (LEGACY_AGENT_CALLOUT.test(lines[i].trim())) {
+      const end = calloutBlockEnd(lines, i, area.end);
+      for (let j = i + 1; j < end; j++) {
+        const parsed = readAgentTableRow(lines[j]);
+        if (parsed) {
+          rows.push(`| ${tableTime(parsed.stamp)} | ${parsed.scope ? escapeCell(parsed.scope) : ''} | ${escapeCell(parsed.summary)} |`);
+        }
+      }
+      if (anchor === -1) anchor = i;
+      for (let j = i; j < end; j++) remove.push(j);
+      i = end - 1;
+      continue;
+    }
     const row = readAgentTableRow(lines[i]);
     if (row) {
       rows.push(`| ${tableTime(row.stamp)} | ${row.scope ? escapeCell(row.scope) : ''} | ${escapeCell(row.summary)} |`);
+      if (anchor === -1) anchor = i;
       remove.push(i);
       continue;
     }
     const cells = tableCellsOf(lines[i]);
     if (cells && /^time$/i.test(String(cells[0]).trim())) {
+      if (anchor === -1) anchor = i;
       remove.push(i);
       let cursor = i + 2;
       while (cursor < area.end && readAgentTableRow(lines[cursor])) cursor++;
@@ -1144,6 +1208,7 @@ function convertAgentAreaBullets(lines) {
     while (cursor < area.end && /^(?: {2,}|\t)\S/.test(lines[cursor])) continuation.push(lines[cursor++].trim());
     if (continuation.length) summary += '<br>' + continuation.join('<br>');
     rows.push(`| ${tableTime(match[1])} |  | ${escapeCell(summary)} |`);
+    if (anchor === -1) anchor = i;
     for (let j = i; j < cursor; j++) remove.push(j);
     i = cursor - 1;
   }
@@ -1151,8 +1216,188 @@ function convertAgentAreaBullets(lines) {
   const unique = [...new Set(remove)].sort((a, b) => b - a);
   for (const index of unique) lines.splice(index, 1);
   ensureLogArea(lines, 'agent');
-  appendAgentRows(lines, rows);
+  appendAgentRows(lines, rows, anchor);
   return rows.length;
+}
+
+/** One timestamped log bullet's stamp and summary, in either bullet form the log uses. */
+function readLogEntry(line) {
+  const match = line.match(/^- \*\*(?:\[)?([^\]*]+?)(?:\])?\*\*(?::\s*|\s+)(.*)$/);
+  if (!match) return null;
+  const stamp = match[1].trim();
+  if (minuteOfDay(stamp) === null) return null;
+  return { stamp, summary: match[2].trim() };
+}
+
+/** Timestamped bullets inside one area, with their continuation lines. */
+function timedBlocks(lines, bounds) {
+  const blocks = [];
+  for (let index = bounds.start + 1; index < bounds.end; index += 1) {
+    const entry = readLogEntry(lines[index]);
+    if (!entry) continue;
+    let cursor = index + 1;
+    while (cursor < bounds.end && /^(?: {2,}|\t)\S/.test(lines[cursor])) cursor += 1;
+    blocks.push({
+      start: index,
+      end: cursor,
+      stamp: entry.stamp,
+      summary: entry.summary,
+      continuation: lines
+        .slice(index + 1, cursor)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .join('<br>')
+    });
+    index = cursor - 1;
+  }
+  return blocks;
+}
+
+function migrationRow(block) {
+  const summary = escapeCell(block.continuation ? `${block.summary}<br>${block.continuation}` : block.summary);
+  return `| ${displayLogTime(block.stamp, '&nbsp;')} |  | ${summary} |`;
+}
+
+/** Entries inside one area: timestamped bullets and agent-table rows. */
+function logAreaEntries(content, area) {
+  const newline = content.includes('\r\n') ? '\r\n' : '\n';
+  const lines = content.split(newline);
+  const bounds = logAreaBounds(lines, area);
+  if (!bounds) return [];
+  const entries = [];
+  for (let index = bounds.start + 1; index < bounds.end; index += 1) {
+    const bullet = readLogEntry(lines[index]);
+    if (bullet) {
+      entries.push({ stamp: bullet.stamp, scope: '', summary: bullet.summary });
+      continue;
+    }
+    const row = readAgentTableRow(lines[index]);
+    if (row) entries.push(row);
+  }
+  return entries;
+}
+
+/** Drop the blank spacer directly under an area heading once the area carries entries. */
+function tidyAreaSpacer(lines, area) {
+  const body = logAreaBounds(lines, area);
+  if (!body) return;
+  let spacer = body.start + 1;
+  while (spacer < body.end && lines[spacer].trim() === '') spacer += 1;
+  if (spacer === body.start + 1) return;
+  if (!lines.slice(spacer, body.end).some((entry) => /^\s*-\s+\S/.test(entry))) return;
+  lines.splice(body.start + 1, spacer - body.start - 1);
+}
+
+/**
+ * Put one daily note into its canonical shape without guessing authorship.
+ *
+ * Format migration is automatic: every labelled area is created, agent bullets and any legacy
+ * `Agent Milestone Log` callout become the area's one table. A personal entry moves into that
+ * table ONLY when the caller names it with --select or --select-summary. No verb, capitalisation
+ * or tone is treated as evidence, so an ambiguous or unmatched selection writes nothing.
+ */
+function migrateAgentMilestones(content, selection = {}) {
+  const newline = content.includes('\r\n') ? '\r\n' : '\n';
+  const lines = content.split(newline);
+  if (!dailyLogBounds(lines)) {
+    return { content, moved: [], kept: [], adopted: 0, selectionErrors: [], ok: false };
+  }
+
+  for (const area of LOG_AREA_ORDER) ensureLogArea(lines, area);
+  const adopted = adoptCalloutAreas(lines);
+
+  const personal = logAreaBounds(lines, 'personal');
+  const blocks = personal ? timedBlocks(lines, personal) : [];
+  const chosen = new Map();
+  const selectionErrors = [];
+
+  const select = (label, matches) => {
+    const already = matches.filter((block) => chosen.has(block.start));
+    if (matches.length > 0 && already.length === matches.length) return;
+    if (matches.length === 0) {
+      selectionErrors.push(`${label} matches no timestamped personal entry`);
+      return;
+    }
+    if (matches.length > 1) {
+      selectionErrors.push(`${label} matches ${matches.length} personal entries; name one`);
+      return;
+    }
+    chosen.set(matches[0].start, matches[0]);
+  };
+
+  for (const stamp of selection.selectStamps || []) {
+    const minutes = minuteOfDay(stamp);
+    if (minutes === null) {
+      selectionErrors.push(`--select "${stamp}" is not a time (use e.g. "09:21 AM")`);
+      continue;
+    }
+    select(`--select "${stamp}"`, blocks.filter((block) => minuteOfDay(block.stamp) === minutes));
+  }
+  for (const text of selection.selectSummaries || []) {
+    const needle = text.trim();
+    if (!needle) {
+      selectionErrors.push('--select-summary requires some text');
+      continue;
+    }
+    select(`--select-summary "${needle}"`, blocks.filter((block) => block.summary.includes(needle)));
+  }
+
+  if (selectionErrors.length > 0) {
+    return {
+      content,
+      moved: [],
+      kept: blocks.map((block) => block.summary),
+      adopted: 0,
+      selectionErrors,
+      ok: true
+    };
+  }
+
+  const ordered = [...chosen.values()].sort((left, right) => left.start - right.start);
+  for (let index = ordered.length - 1; index >= 0; index -= 1) {
+    const block = ordered[index];
+    lines.splice(block.start, block.end - block.start);
+  }
+
+  convertAgentAreaBullets(lines);
+  if (ordered.length > 0) appendAgentRows(lines, ordered.map(migrationRow));
+
+  for (const area of LOG_AREA_ORDER) tidyAreaSpacer(lines, area);
+  const migrated = normalizeDailyLog(lines.join(newline));
+  return {
+    content: migrated,
+    moved: ordered.map((block) => block.summary),
+    kept: logAreaEntries(migrated, 'personal').map((entry) => entry.summary),
+    adopted,
+    selectionErrors: [],
+    ok: true
+  };
+}
+
+/** `migrate-log` flags: repeated selections, an optional date and a dry run. */
+function parseMigrateArgs(tokens) {
+  const parsed = { date: null, select: [], selectSummaries: [], dryRun: false, errors: [] };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === '--dry-run') {
+      parsed.dryRun = true;
+      continue;
+    }
+    if (token === '--date' || token === '--select' || token === '--select-summary') {
+      const value = tokens[index + 1];
+      if (value === undefined || value.startsWith('--')) {
+        parsed.errors.push(`${token} requires a value`);
+        continue;
+      }
+      if (token === '--date') parsed.date = value;
+      else if (token === '--select') parsed.select.push(value);
+      else parsed.selectSummaries.push(value);
+      index += 1;
+      continue;
+    }
+    parsed.errors.push(`unexpected argument: ${token}; use --date <YYYY-MM-DD>`);
+  }
+  return parsed;
 }
 
 function insertAgentTableRow(content, timeStr, message) {
@@ -1172,7 +1417,7 @@ function insertAgentTableRow(content, timeStr, message) {
   // One container, whatever the note arrived with: adopt a stranded legacy callout, fold bullets or
   // the previous plain table into rows, then append the new row to the table that is now there.
   ensureLogArea(lines, 'agent');
-  adoptAgentCallout(lines);
+  adoptCalloutAreas(lines);
   convertAgentAreaBullets(lines);
   appendAgentRows(lines, [
     `| ${format12hNbsp(timeStr)} | ${scope ? escapeCell(scope) : ''} | ${escapeCell(summary)} |`,
@@ -2271,7 +2516,7 @@ if (['done', 'milestone', 'personal'].includes(command)) {
 // Commands that WRITE vault records. Readers (brief/context/status/help/install-hook)
 // take no lock: contention should never delay a read, and install-hook writes into a
 // repository's own .git/hooks, not into vault records.
-const WRITER_COMMANDS = new Set(['done', 'milestone', 'personal', 'log', 'sync', 'handoff', 'save', 'learn', 'snippet', 'dream', 'prune']);
+const WRITER_COMMANDS = new Set(['done', 'milestone', 'personal', 'log', 'sync', 'handoff', 'save', 'learn', 'snippet', 'dream', 'prune', 'migrate-log']);
 
 async function dispatch() {
   if (WRITER_COMMANDS.has(command)) {
@@ -2453,6 +2698,85 @@ async function dispatch() {
     process.exit(OUTCOME_EXIT[outcome] ?? 1);
   }
 
+  case 'migrate-log':
+  case 'migrate': {
+    const parsed = parseMigrateArgs(args.slice(1));
+    if (parsed.errors.length) {
+      for (const message of parsed.errors) console.error(`[heyloey] ${message}`);
+      console.error('[heyloey] Nothing written.');
+      process.exit(1);
+    }
+    if (parsed.date && !/^\d{4}-\d{2}-\d{2}$/.test(parsed.date)) {
+      console.error(`[heyloey] --date must be YYYY-MM-DD, got "${parsed.date}". Nothing written.`);
+      process.exit(1);
+    }
+
+    const synthetic = detectSynthetic();
+    const dateStr = parsed.date || getTodayInfo().dateStr;
+    const rel = path.join('01-Daily', dateStr.slice(0, 7), `${dateStr}.md`);
+    const notePath = path.join(VAULT_DIR, rel);
+
+    if (synthetic.synthetic) {
+      console.log(`[heyloey] SKIPPED migrate-log - explicit synthetic opt-out (${synthetic.reason}); nothing written.`);
+      process.exit(OUTCOME_EXIT.skipped);
+    }
+    if (!fs.existsSync(notePath)) {
+      console.error(`[heyloey] REFUSED migrate-log: ${rel} is absent - ${DAILY_NOTE_HINT}; nothing written.`);
+      reportOutcome('migrate-log', [['daily', { status: 'missing', path: rel, detail: 'daily note absent' }]], 'refused', synthetic);
+      process.exit(OUTCOME_EXIT.refused);
+    }
+
+    const original = fs.readFileSync(notePath, 'utf8');
+    const migrated = migrateAgentMilestones(original, {
+      selectStamps: parsed.select,
+      selectSummaries: parsed.selectSummaries
+    });
+
+    if (!migrated.ok) {
+      console.error(`[heyloey] REFUSED migrate-log: ${rel} has no ${DAILY_LOG_HEADING} section, so there is nothing to separate. Nothing written.`);
+      reportOutcome('migrate-log', [['daily', { status: 'missing', path: rel, detail: 'daily log section absent' }]], 'refused', synthetic);
+      process.exit(OUTCOME_EXIT.refused);
+    }
+    if (migrated.selectionErrors.length) {
+      for (const message of migrated.selectionErrors) console.error(`[heyloey] ${message}`);
+      console.error('[heyloey] Nothing written. Name exactly one personal entry per --select/--select-summary; an ambiguous or unmatched selection is refused rather than guessed.');
+      reportOutcome('migrate-log', [['daily', { status: 'not-attempted', path: rel, detail: 'selection invalid' }]], 'refused', synthetic, ` migrated=0 kept=${migrated.kept.length} adopted=0 note=${rel}`);
+      process.exit(OUTCOME_EXIT.refused);
+    }
+
+    if (parsed.dryRun) {
+      console.log(`[heyloey] DRY RUN - nothing written. Vault: ${VAULT_DIR}`);
+      console.log(`[heyloey]   ${rel} [${LOG_AREA_HEADINGS.personal} -> ${LOG_AREA_HEADINGS.agent}]`);
+      for (const summary of migrated.moved) console.log(`[heyloey]     -> ${summary}`);
+      if (migrated.adopted > 0) console.log(`[heyloey]     => ${migrated.adopted} legacy callout(s) adopted by the agent area`);
+      for (const summary of migrated.kept) console.log(`[heyloey]     . left in place: ${summary}`);
+      process.exit(0);
+    }
+
+    const extra = ` migrated=${migrated.moved.length} kept=${migrated.kept.length} adopted=${migrated.adopted} note=${rel} verified=daily`;
+    if (migrated.content === original) {
+      console.log(`[heyloey] ALREADY-RECORDED migrate-log: ${rel} is already separated (${migrated.moved.length} moved, ${migrated.kept.length} left in place); nothing changed.`);
+      reportOutcome('migrate-log', [['daily', { status: 'already-recorded', path: rel, detail: 'note already separated' }]], 'already-recorded', synthetic, extra);
+      process.exit(OUTCOME_EXIT['already-recorded']);
+    }
+
+    try {
+      atomicWriteFileSync(notePath, migrated.content);
+    } catch (e) {
+      console.error(`[heyloey] FAILED migrate-log: ${rel} - ${e.message}`);
+      reportOutcome('migrate-log', [['daily', { status: 'failed', path: rel, detail: e.message }]], 'failed', synthetic, extra);
+      process.exit(OUTCOME_EXIT.failed);
+    }
+    if (fs.readFileSync(notePath, 'utf8') !== migrated.content) {
+      console.error(`[heyloey] FAILED migrate-log: ${rel} - post-write verification failed; the note is not as written.`);
+      reportOutcome('migrate-log', [['daily', { status: 'failed', path: rel, detail: 'post-write verification failed' }]], 'failed', synthetic, extra);
+      process.exit(OUTCOME_EXIT.failed);
+    }
+    console.log(`[heyloey] SEPARATED ${rel}: ${migrated.moved.length} moved, ${migrated.adopted} callout(s) adopted, ${migrated.kept.length} left in place.`);
+    reportOutcome('migrate-log', [['daily', { status: 'written', path: rel, detail: 'note separated' }]], 'logged', synthetic, extra);
+    process.exit(0);
+  }
+
   case 'brief':
     const includeKiwi = args.includes('--kiwi') || args.includes('--soul');
     console.log(generateBrief(includeKiwi));
@@ -2581,6 +2905,9 @@ Commands:
   handoff "<msg>"            Update handoff.md (with auto-pruning)
   status                     Check status of daily note, handoff, and Kiwi SOUL.md
   install-hook               Install auto-logging post-commit hook into current git repo
+  migrate-log [options]      Separate one daily note: create its labelled areas and fold agent
+                             bullets/callouts into the one agent table. A personal entry moves
+                             only when named with --select or --select-summary.
 
 Targeting:
   LOEY_SPACE_DIR=<dir>       Target vault for this CLI. Overrides LOEY_VAULT_ROOT.
@@ -2589,6 +2916,11 @@ Targeting:
   LOEY_SPACE_SYNTHETIC=1     Explicit synthetic-test opt-out: writes nothing.
                              A '.loey-synthetic' sentinel in the repo root or cwd
                              has the same effect.
+
+  --date <day>               With migrate-log: the daily note to separate (YYYY-MM-DD). Default: today.
+  --select <time>            With migrate-log: move exactly one personal entry with this time, e.g. "09:21 AM".
+  --select-summary <text>    With migrate-log: the same, by a unique substring of the summary.
+  --dry-run                  With migrate-log: report what would move and write nothing.
 
 Outcomes (also emitted as one machine-readable line:
   [heyloey] RESULT <cmd> <outcome> <record>=<status> ... target=<dir> source=<src>)
