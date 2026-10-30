@@ -1330,7 +1330,7 @@ function migrateAgentMilestones(content, selection = {}) {
   const newline = content.includes('\r\n') ? '\r\n' : '\n';
   const lines = content.split(newline);
   if (!dailyLogBounds(lines)) {
-    return { content, moved: [], kept: [], adopted: 0, selectionErrors: [], ok: false };
+    return { content, moved: [], kept: [], adopted: 0, selectionErrors: [], hasDailyLog: false };
   }
 
   for (const area of LOG_AREA_ORDER) ensureLogArea(lines, area);
@@ -1379,7 +1379,7 @@ function migrateAgentMilestones(content, selection = {}) {
       kept: blocks.map((block) => block.summary),
       adopted: 0,
       selectionErrors,
-      ok: true
+      hasDailyLog: true
     };
   }
 
@@ -1400,7 +1400,7 @@ function migrateAgentMilestones(content, selection = {}) {
     kept: logAreaEntries(migrated, 'personal').map((entry) => entry.summary),
     adopted,
     selectionErrors: [],
-    ok: true
+    hasDailyLog: true
   };
 }
 
@@ -1970,7 +1970,7 @@ function routeContextWithLaya(queryStr) {
   const matchedRunbooks = searchEngine.searchVaultRunbooks(VAULT_DIR, query, { limit: 2, minScore: 1.2 });
 
   const out = [generateBrief(false)];
-  out.push(`\n=== LAYA CONTEXT ROUTER (query: "${query || 'auto'}") ===`);
+  out.push(`\n=== HEYLOEY CONTEXT ROUTER (query: "${query || 'auto'}") ===`);
 
   if (bestProject && bestScore > 0) {
     const statusMatch = bestProject.content.match(/^status:\s*([^\r\n]+)/m);
@@ -2369,7 +2369,7 @@ async function dispatch() {
       selectSummaries: parsed.selectSummaries
     });
 
-    if (!migrated.ok) {
+    if (!migrated.hasDailyLog) {
       console.error(`[heyloey] REFUSED migrate-log: ${rel} has no ${DAILY_LOG_HEADING} section, so there is nothing to separate. Nothing written.`);
       reportOutcome('migrate-log', [['daily', { status: 'missing', path: rel, detail: 'daily log section absent' }]], 'refused', synthetic);
       process.exit(OUTCOME_EXIT.refused);
@@ -2570,7 +2570,7 @@ Commands:
   brief [--kiwi]             Condensed ~400-token snapshot of memory + handoff + today's tasks (add --kiwi for SOUL.md)
   lock-state                 Read-only report: lock protocol, \`flock\` presence, configuration, and any
                              legacy file-tier lock state (exit 0 ready / 8 unusable / 9 legacy state)
-  context [query]            Laya System-1 context router: outputs brief + matched 02-Projects hub & 03-Dev runbooks
+  context [query]            Single-pass context router: outputs brief + matched 02-Projects hub & 03-Dev runbooks
   learn "<title>" "<fix>"    Crystallize a reusable debugging fix/pattern into 03-Dev/<title>.md (--lang=bash|ts|py)
   dream                      Run Nightly Dream Loop (auto-prune handoff.md >10 items to 07-Reviews/, carry over tasks, check rot)
   done "<msg>"               Log to today's daily note AND update handoff.md (with auto-pruning & deduplication)

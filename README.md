@@ -11,8 +11,9 @@ Hardened Model Context Protocol (MCP) server providing external coding agents wi
 
 - **Field Engineer vs. Chief-of-Staff Boundary**: External coding agents cannot perform generic markdown writes or scaffold daily notes. The vault curator agent owns general curation.
 - **Strict Read-Only Enforcement**: Ordinary note tools (`read_text_file`, `list_directory`, `get_file_info`, `list_allowed_directories`) deny private directories (`00-Private/`, `05-Personal/`, `.secrets/`, `.git/`, `.env`) and reject directory traversal (`../`) or symlink escapes.
-- **Dependency-Free Hybrid Context Retrieval**: `heyloey_context` combines Laya System-1 classification with a pure-JS BM25 ranker, Porter English stemmer, and technical synonym expansion over `03-Dev/` and `08-Concepts/`. The ranker is in-memory JavaScript with no native addons and no runtime dependencies.
+- **Dependency-Free Hybrid Context Retrieval**: `heyloey_context` runs a single-pass keyword scorer plus a pure-JS BM25 ranker (Porter English stemmer and technical synonym expansion) over `03-Dev/` and `08-Concepts/`. There is no external classifier or Laya call: the router is in-memory JavaScript with no native addons and no runtime dependencies.
 - **Single Locked Mutation Path**: `heyloey_done` and `heyloey_learn` are the sole mutation tools. They delegate to the companion canonical CLI (`heyloey`) under util-linux kernel locks (`flock`).
+- **One disclosed code-execution point**: `heyloey_brief` may `require()` the vault's own `06-Resources/scripts/weekly-ai-summary.js` when it exists. That file must stay owner-controlled; nothing in this server can write to it, but a synced or shared vault is a code surface.
 - **Lossless Paging**: `read_text_file` provides windowed line paging (`head`, `offset`) and character continuation (`char_offset`), guaranteeing 100% exact source reconstruction across long-line cutoffs and blank-line boundaries.
 - **Process Group Isolation**: Spawns CLI tasks detached and discovers all descendant process groups via `/proc`. If a process hangs, saturates pipe buffers (>128 KB), or times out, the entire process tree (including detached `flock` and grandchild writers) is cleanly reaped with `SIGKILL`.
 
@@ -120,7 +121,7 @@ If the checkout moves, the link breaks. Re-run the installer from the new locati
 
 ## 🧪 Testing
 
-The repository features four test suites:
+The repository features seven suites, plus a script that runs them all:
 
 1. **Hermetic Unit & Regression Suite** (20 tests, runs in CI without external dependencies):
    ```bash
@@ -130,15 +131,27 @@ The repository features four test suites:
    ```bash
    npm run test:install
    ```
-3. **Migrate-Log Suite** (10 tests, covers area creation, explicit selection, ambiguous and unmatched refusals, dry-run and idempotency):
+3. **Post-commit Hook Suite** (3 tests: trailer gating, foreign-hook refusal, core.hooksPath):
+   ```bash
+   npm run test:hook
+   ```
+4. **Escaping & Dedupe Suite** (3 tests: HTML escaping in both records, exact-entry deduplication):
+   ```bash
+   npm run test:escaping
+   ```
+5. **Search-Engine Parity Suite** (2 tests: module/CLI parity and symlinked invocation):
+   ```bash
+   npm run test:search
+   ```
+6. **Migrate-Log Suite** (12 tests, covers area creation, explicit selection, ambiguous and unmatched refusals, dry-run and idempotency):
    ```bash
    npm run test:migrate
    ```
-4. **Integration Suite** (5 tests, runs real canonical CLI in temporary isolated mock vaults):
+7. **Integration Suite** (5 tests, runs real canonical CLI in temporary isolated mock vaults):
    ```bash
    npm run test:integration
    ```
-5. **Run All** (42 tests total):
+8. **Run All** (52 tests total):
    ```bash
    npm run test:all
    ```

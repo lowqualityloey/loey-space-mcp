@@ -5,6 +5,14 @@
   "bin": {
     "loey-space-mcp": "./bin/loey-space-mcp"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "canonical/",
+    "clients/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "install:cli": "node tools/install-cli.mjs",
     "test": "node --test test/test-safe-mcp.mjs",
@@ -29,6 +37,14 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
     "zod": "4.6.7"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lowqualityloey/loey-space-mcp.git"
+  },
+  "homepage": "https://github.com/lowqualityloey/loey-space-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/lowqualityloey/loey-space-mcp/issues"
   },
   "license": "MIT"
 }

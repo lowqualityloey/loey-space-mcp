@@ -531,6 +531,15 @@ test('launcher - enforces explicit absolute LOEY_VAULT_ROOT', async () => {
   const runExtraFlags = spawnSync(launcherPath, ['--extra-flag'], { env: process.env, encoding: 'utf8' });
   assert.equal(runExtraFlags.status, 2);
   assert.ok(runExtraFlags.stderr.includes('accepts no extra roots or flags'));
+
+  // 4. Informational flags succeed without a vault root
+  const runHelp = spawnSync(launcherPath, ['--help'], { env: process.env, encoding: 'utf8' });
+  assert.equal(runHelp.status, 0);
+  assert.ok(runHelp.stdout.includes('Usage: loey-space-mcp'));
+
+  const runVersion = spawnSync(launcherPath, ['--version'], { env: process.env, encoding: 'utf8' });
+  assert.equal(runVersion.status, 0);
+  assert.match(runVersion.stdout.trim(), /^\d+\.\d+\.\d+/);
 });
 
 test('canonical CLI - brief includes maintenance alerts when thresholds are reached', async () => {
@@ -620,7 +629,7 @@ test('hybrid-search & canonical CLI - BM25 context retrieval with procedural fix
       env: { ...process.env, LOEY_SPACE_DIR: vault.root },
       encoding: 'utf8'
     });
-    assert.ok(cliOut.includes('=== LAYA CONTEXT ROUTER'));
+    assert.ok(cliOut.includes('=== HEYLOEY CONTEXT ROUTER'));
     assert.ok(cliOut.includes('Matched Runbooks / 03-Dev Snippets:'));
     assert.ok(cliOut.includes('03-Dev/OpenViking stale Docker WSL mount.md'));
     assert.ok(cliOut.includes('Restart existing container to refresh the stale Docker Desktop WSL mount.'));

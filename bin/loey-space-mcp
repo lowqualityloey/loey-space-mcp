@@ -10,10 +10,18 @@ while [ -h "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 
-# Reject any CLI arguments/flags
-if [ "$#" -ne 0 ]; then
-  echo "loey-space-mcp: this external-agent interface accepts no extra roots or flags" >&2
-  exit 2
+# Informational flags only. Roots and arbitrary flags stay refused: the vault is fixed
+# by LOEY_VAULT_ROOT, and this interface must never accept a second root.
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  cat <<'USAGE'
+loey-space-mcp - hardened, read-only MCP server for loey_space notes
+
+Usage: loey-space-mcp [--help] [--version]
+
+With no arguments it starts the stdio MCP server. The vault root must be supplied
+as an absolute LOEY_VAULT_ROOT (see README).
+USAGE
+  exit 0
 fi
 
 # Discover Node binary
@@ -26,6 +34,16 @@ fi
 if [ -z "$NODE_EXEC" ] || [ ! -x "$NODE_EXEC" ]; then
   echo "loey-space-mcp: node executable not found in PATH" >&2
   exit 1
+fi
+
+if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-V" ]; then
+  "$NODE_EXEC" -e "process.stdout.write(require(process.argv[1]).version + '\n')" "$SCRIPT_DIR/package.json"
+  exit 0
+fi
+
+if [ "$#" -ne 0 ]; then
+  echo "loey-space-mcp: this external-agent interface accepts no extra roots or flags" >&2
+  exit 2
 fi
 
 # Require explicit, absolute vault root
