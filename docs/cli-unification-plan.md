@@ -94,6 +94,12 @@ recovery and shutdown behavior. Use that matrix to decide a portable shared
 core and reproducible distribution strategy. Avoid a runtime dependency from
 public vault clones on an owner's absolute path or private repository.
 
+`migrate-log` was ported to the canonical CLI on 27 October 2026, with
+`test/test-migrate-log.mjs` covering area creation, explicit selection, ambiguous
+and unmatched refusals, dry-run and idempotency. The remaining differences are the
+vault CLI's global `--root` and `--show-paths` flags, and the `done --personal`
+shorthand that the canonical writer deliberately refuses.
+
 The proposed next implementation task is steps 1-3 for the two equal full CLI
 copies. Repository CLI consolidation, dependency upgrades and other enhancement
 work remain separate tasks. No commits or pushes are part of this plan.

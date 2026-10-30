@@ -32,5 +32,8 @@ jobs:
       - name: Run installer safety tests
         run: npm run test:install
 
+      - name: Run migrate-log regression tests
+        run: npm run test:migrate
+
       - name: Run integration tests (temporary vault)
         run: npm run test:integration

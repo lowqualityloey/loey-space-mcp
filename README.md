@@ -38,7 +38,7 @@ Hardened Model Context Protocol (MCP) server providing external coding agents wi
 - **Exit 8**: Lock unavailable (e.g. missing `flock`, or a retired lock knob is set).
 - **Exit 9**: A legacy file-tier lock is present; nothing written, nothing removed, operator review needed.
 
-**Command surface.** The canonical writer implements `brief`, `context`, `done`, `personal`, `learn`, `dream`, `log`, `handoff`, `status`, `lock-state` and `install-hook`. `done --personal` is deliberately refused: `personal` is the only owner-entry path, and it never touches `handoff.md`. The vault's repository-local CLI (`npm run heyloey`) still owns `migrate-log` and the `--root`, `--dry-run` and `--show-paths` flags, so the two are not interchangeable yet — consolidating them is tracked in `docs/cli-unification-plan.md`.
+**Command surface.** The canonical writer implements `brief`, `context`, `done`, `personal`, `learn`, `dream`, `log`, `handoff`, `status`, `lock-state`, `install-hook` and `migrate-log`. `migrate-log` normalises one daily note into its three labelled areas, folds bullets and a legacy callout into the single agent table, and moves a personal entry only when it is named with `--select` or `--select-summary`; it also accepts `--date` and `--dry-run`. `done --personal` is deliberately refused: `personal` is the only owner-entry path, and it never touches `handoff.md`. The vault's repository-local CLI (`npm run heyloey`) still owns the global `--root` and `--show-paths` flags, so the two are not interchangeable yet — consolidating them is tracked in `docs/cli-unification-plan.md`.
 
 ---
 
@@ -76,7 +76,8 @@ loey-space-mcp/
 │   │   ├── mock-vault.mjs           # Ephemeral vault fixture generator
 │   │   └── mock-cli.cjs             # Mock CLI simulator
 │   ├── test-safe-mcp.mjs            # 20 hermetic unit and regression tests
-│   └── test-integration.mjs         # 5 integration tests running canonical CLI in temp vault
+│   ├── test-integration.mjs         # 5 integration tests running canonical CLI in temp vault
+│   └── test-migrate-log.mjs         # 10 migrate-log separation and refusal tests
 ├── tools/
 │   └── install-cli.mjs              # Idempotent installer for the installed `heyloey` command
 ├── docs/
@@ -111,7 +112,7 @@ If the checkout moves, the link breaks. Re-run the installer from the new locati
 
 ## 🧪 Testing
 
-The repository features three test suites:
+The repository features four test suites:
 
 1. **Hermetic Unit & Regression Suite** (20 tests, runs in CI without external dependencies):
    ```bash
@@ -121,11 +122,15 @@ The repository features three test suites:
    ```bash
    npm run test:install
    ```
-3. **Integration Suite** (5 tests, runs real canonical CLI in temporary isolated mock vaults):
+3. **Migrate-Log Suite** (10 tests, covers area creation, explicit selection, ambiguous and unmatched refusals, dry-run and idempotency):
+   ```bash
+   npm run test:migrate
+   ```
+4. **Integration Suite** (5 tests, runs real canonical CLI in temporary isolated mock vaults):
    ```bash
    npm run test:integration
    ```
-4. **Run All** (32 tests total):
+5. **Run All** (42 tests total):
    ```bash
    npm run test:all
    ```
