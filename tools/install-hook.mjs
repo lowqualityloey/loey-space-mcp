@@ -16,7 +16,8 @@
  * before the template existed or that opt out of inheritance.
  *
  * Safety rules:
- *  - An existing target is backed up beside itself, timestamped, before it is
+ *  - An existing target is copied to
+ *    ~/.local/state/heyloey/hook-backups/<mirrored target path>.bak before it is
  *    replaced; nothing is ever deleted.
  *  - An existing target that differs from the source and was NOT written by this
  *    installer is refused unless --force is given, so a hand-maintained hook is
@@ -49,6 +50,16 @@ const MARKER = '# Installed by loey-space-mcp tools/install-hook.mjs';
  * test that counts "post-commit.bak-*" there then sees files it never wrote.
  */
 const BACKUP_DIR = path.join(os.homedir(), '.local', 'state', 'heyloey', 'hook-backups');
+
+/**
+ * Mirror a target path under BACKUP_DIR so two different repositories never
+ * share one backup name. Flattening to a basename alone would let installing
+ * into a second repository silently overwrite the previous repository's backup.
+ */
+function backupPathFor(target) {
+  const parts = target.split(/[\\/]+/).filter((part) => part && part !== ':' && !/^[A-Za-z]:$/.test(part));
+  return path.join(BACKUP_DIR, ...parts) + '.bak';
+}
 
 function fail(message, code = 1) {
   console.error(`heyloey-hook: ${message}`);
@@ -161,8 +172,8 @@ if (fs.existsSync(target)) {
   // A single backup per target, overwritten on each replacement: a history of
   // stale hook copies helps nobody and git would copy every one of them into new
   // repositories if they sat in the template directory.
-  fs.mkdirSync(BACKUP_DIR, {recursive: true});
-  backup = path.join(BACKUP_DIR, `${path.basename(target)}.bak`);
+  backup = backupPathFor(target);
+  fs.mkdirSync(path.dirname(backup), {recursive: true});
   fs.copyFileSync(target, backup);
   console.log(`heyloey-hook: backed up the existing hook to ${backup}`);
 }

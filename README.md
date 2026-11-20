@@ -160,10 +160,10 @@ Installation is idempotent and non-destructive:
   git silently skips a non-executable hook).
 - A target this installer did not write — anything without its marker line — is refused unless
   `--force` is given.
-- The previous hook is copied to `~/.local/state/heyloey/hook-backups/post-commit.bak` before it is
-  replaced. The backup is deliberately kept **outside** the template directory: git copies every file
-  in a template's `hooks/` folder into each new repository, so a backup left there would end up in
-  every future `.git/hooks`.
+- The previous hook is copied to `~/.local/state/heyloey/hook-backups/<mirrored target path>.bak`
+  before it is replaced, so two repositories never share one backup name. The backup is deliberately
+  kept **outside** the template directory: git copies every file in a template's `hooks/` folder into
+  each new repository, so a backup left there would end up in every future `.git/hooks`.
 - The swap is a single atomic `rename`, so an interrupted install leaves either the old hook or the
   new one and never half of one.
 
