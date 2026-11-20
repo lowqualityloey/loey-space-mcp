@@ -39,7 +39,7 @@ Hardened Model Context Protocol (MCP) server providing external coding agents wi
 - **Exit 8**: Lock unavailable (e.g. missing `flock`, or a retired lock knob is set).
 - **Exit 9**: A legacy file-tier lock is present; nothing written, nothing removed, operator review needed.
 
-**Command surface.** The canonical writer implements `brief`, `context`, `done`, `personal`, `learn`, `dream`, `log`, `handoff`, `status`, `lock-state`, `install-hook` and `migrate-log`. `migrate-log` normalises one daily note into its three labelled areas, folds bullets and a legacy callout into the single agent table, and moves a personal entry only when it is named with `--select` or `--select-summary`; it also accepts `--date` and `--dry-run`. Every command accepts `--root <dir>`, which wins over the environment variables and resolves relative paths against the working directory. Writing commands accept a global `--dry-run` (prints the lines that would be written, takes no lock, changes nothing) and `--show-paths` (absolute paths in that preview; vault-relative by default). `done --personal` and `personal` are the owner-entry forms: the entry lands under Personal Log and `handoff.md` is never touched. `learn` merges a colliding title into a marked, reviewable region instead of overwriting hand-written content. The vault's repository-local CLI (`npm run heyloey`) still owns the global `--root` and `--show-paths` flags, so the two are not interchangeable yet — consolidating them is tracked in `docs/cli-unification-plan.md`.
+**Command surface.** The canonical writer implements `brief`, `context`, `done`, `personal`, `learn`, `dream`, `log`, `handoff`, `status`, `lock-state`, `install-hook` and `migrate-log`. `migrate-log` normalises one daily note into its three labelled areas, folds bullets and a legacy callout into the single agent table, and moves a personal entry only when it is named with `--select` or `--select-summary`; it also accepts `--date` and `--dry-run`. Every command accepts `--root <dir>`, which wins over the environment variables and resolves relative paths against the working directory. Writing commands accept a global `--dry-run` (prints the lines that would be written, takes no lock, changes nothing) and `--show-paths` (absolute paths in that preview; vault-relative by default). `done` also accepts `--date <YYYY-MM-DD>` and `--time <HH:MM>` to name the moment a milestone actually happened, so a write replayed after midnight is filed in its own day's note instead of today's; the flags are refused on every other command rather than being swallowed as message text, `--date` must be a real calendar day, and the handoff's `updated:` field keeps naming when the file was touched. `done --personal` and `personal` are the owner-entry forms: the entry lands under Personal Log and `handoff.md` is never touched. `learn` merges a colliding title into a marked, reviewable region instead of overwriting hand-written content. The vault's repository-local CLI (`npm run heyloey`) still owns the global `--root` and `--show-paths` flags, so the two are not interchangeable yet — consolidating them is tracked in `docs/cli-unification-plan.md`.
 
 ---
 
@@ -145,9 +145,12 @@ What the hook guarantees, and why each part exists:
   unreachable — a read-only mount, a sandbox that scopes writes elsewhere — the milestone is queued
   in `.git/heyloey-milestones.pending` and exits 0, and the next commit that can write replays it
   through the same code path.
-- **A replay is honest about when it happened.** Each queued record keeps its original UTC stamp, so a
-  milestone queued before midnight is logged as `[YYYY-MM-DD HH:MM] summary` rather than silently
-  claimed as today's work.
+- **A replay lands in the day it happened.** Each queued record carries both its original UTC stamp
+  (identity and ordering) and a `Pacific/Auckland` stamp (the vault calendar), and the replay passes
+  the local stamp to `done --date`/`--time`. A milestone queued at 23:50 and replayed at 00:10 is
+  filed in the previous day's note with its own time, instead of being claimed as today's work. A
+  legacy two-field record has no local stamp, so it falls back to the older literal
+  `[YYYY-MM-DD HH:MM] summary` prefix rather than inventing a day.
 - **A replay never duplicates.** A record already present in the daily note is dropped instead of
   written twice, so a partial write or a hand-fix does not produce two rows.
 - **A stale queue lock delays, never drops.** The lock is a bounded `mkdir`; if it is held, the record
@@ -174,7 +177,7 @@ re-image of the machine discards it.
 
 ## 🧪 Testing
 
-The repository features seven suites, plus a script that runs them all:
+The repository features nine suites, plus a script that runs them all (counts below are measured, not estimated):
 
 1. **Hermetic Unit & Regression Suite** (20 tests, runs in CI without external dependencies):
    ```bash
@@ -192,19 +195,29 @@ The repository features seven suites, plus a script that runs them all:
    ```bash
    npm run test:escaping
    ```
-5. **Search-Engine Parity Suite** (2 tests: module/CLI parity and symlinked invocation):
+5. **Search-Engine Parity Suite** (3 tests: module/CLI parity and symlinked invocation):
    ```bash
    npm run test:search
    ```
-6. **Migrate-Log Suite** (12 tests, covers area creation, explicit selection, ambiguous and unmatched refusals, dry-run and idempotency):
+6. **Migrate-Log Suite** (16 tests, covers area creation, explicit selection, ambiguous and unmatched refusals, dry-run and idempotency):
    ```bash
    npm run test:migrate
    ```
-7. **Integration Suite** (5 tests, runs real canonical CLI in temporary isolated mock vaults):
+7. **Back-Dated Milestone Suite** (7 tests: named-day filing, an untouched `updated:` field, absent-day
+   refusal, flag validation, dry-run preview and clock-time defaulting):
+   ```bash
+   npm run test:date
+   ```
+8. **Queue Replay Suite** (6 tests, drives the real hook body: queuing with a vault stamp, dated replay,
+   legacy two-field replay, own-day dedupe, and re-queue on failure):
+   ```bash
+   npm run test:queue
+   ```
+9. **Integration Suite** (5 tests, runs real canonical CLI in temporary isolated mock vaults):
    ```bash
    npm run test:integration
    ```
-8. **Run All** (52 tests total):
+10. **Run All** (78 tests total):
    ```bash
    npm run test:all
    ```

@@ -70,6 +70,59 @@ const DONE_PERSONAL = (() => {
   argv.splice(at, 1);
   return true;
 })();
+// `done --date <YYYY-MM-DD> [--time <HH:MM>]` names the moment the milestone actually
+// happened, so a write that is replayed late still lands in its own day. The post-commit hook
+// uses it to replay a milestone it queued before midnight instead of back-stamping it onto
+// today. Accepted only after `done`/`milestone`, consumed here so it can never become message
+// text, and carried to the flocked child through the environment because the consumed tokens
+// are gone from argv by the time that child starts.
+const DONE_WHEN = (() => {
+  const argv = process.argv;
+  const verb = argv[2] ? argv[2].toLowerCase() : '';
+  const takesFlags = verb === 'done' || verb === 'milestone';
+  const take = (flag, envName) => {
+    const fromEnv = process.env[envName];
+    if (fromEnv) return fromEnv;
+    if (!takesFlags) return null;
+    for (let index = 3; index < argv.length; index += 1) {
+      const arg = argv[index];
+      if (arg === flag) {
+        const value = argv[index + 1];
+        if (value === undefined || value.startsWith('--')) {
+          console.error(`[heyloey] ${flag} requires a value. Nothing written.`);
+          process.exit(1);
+        }
+        argv.splice(index, 2);
+        return value;
+      }
+      if (arg.startsWith(flag + '=')) {
+        const value = arg.slice(flag.length + 1);
+        argv.splice(index, 1);
+        if (!value) {
+          console.error(`[heyloey] ${flag} requires a value. Nothing written.`);
+          process.exit(1);
+        }
+        return value;
+      }
+    }
+    return null;
+  };
+  const when = { date: take('--date', 'LOEY_DONE_DATE'), time: take('--time', 'LOEY_DONE_TIME') };
+  // A back-dated write names a real calendar day and a real 24h clock time, or it writes
+  // nothing: a note silently filed under an impossible date is worse than a refused command.
+  if (when.date !== null) {
+    const parsed = /^\d{4}-\d{2}-\d{2}$/.test(when.date) ? new Date(`${when.date}T00:00:00Z`) : null;
+    if (!parsed || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== when.date) {
+      console.error(`[heyloey] --date must be a real YYYY-MM-DD day, got "${when.date}". Nothing written.`);
+      process.exit(1);
+    }
+  }
+  if (when.time !== null && !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(when.time)) {
+    console.error(`[heyloey] --time must be 24-hour HH:MM, got "${when.time}". Nothing written.`);
+    process.exit(1);
+  }
+  return when;
+})();
 function resolveVaultTarget() {
   // The flocked child inherits LOEY_SPACE_DIR for the resolved target, but the ORIGINAL
   // selector is carried in LOEY_VAULT_SOURCE so `source=` names `--root` rather than the
@@ -189,7 +242,33 @@ function normalizeDailyLog(content) {
 
 function getTodayInfo(offsetDays = 0) {
   const stamp = aucklandStamp(new Date(Date.now() + offsetDays * 86400000));
-  return { dateStr: stamp.date, monthDir: stamp.date.slice(0, 7), timeStr: stamp.time };
+  return { dateStr: stamp.date, monthDir: stamp.date.slice(0, 7), timeStr: stamp.time, backDated: false };
+}
+
+/**
+ * The day and clock time a `done` write belongs to.
+ *
+ * Without `--date` this is today, exactly as before. With it, the caller is naming the moment
+ * the milestone actually happened - typically because the milestone was queued by the
+ * post-commit hook while the vault was unwritable and is only being replayed now. A replayed
+ * write must land in the note for the day it happened, not in today's, or the record is a lie
+ * about when the work was done. `--date` without `--time` keeps the current clock time, which
+ * is the honest reading: the day is known, the minute is not, and inventing one would be worse
+ * than using the minute the write lands.
+ *
+ * `getTodayInfo` is deliberately NOT overridden here: it also decides the handoff's `updated:`
+ * frontmatter and the archive month for pruned updates, and those describe when the FILE was
+ * touched, which is still now. Only the entry's own stamp is back-dated.
+ */
+function resolveWhen(when) {
+  const now = getTodayInfo();
+  if (!when || !when.date) return now;
+  return {
+    dateStr: when.date,
+    monthDir: when.date.slice(0, 7),
+    timeStr: when.time || now.timeStr,
+    backDated: when.date !== now.dateStr
+  };
 }
 
 // --- Explicit synthetic-test opt-out ----------------------------------------
@@ -538,7 +617,12 @@ function runUnderKernelLock() {
           LOEY_VAULT_SOURCE: VAULT_TARGET.source,
           LOEY_LOCK_HELD: '1',
           LOEY_LOCK_IMPL_USED: 'flock',
-          ...(DONE_PERSONAL ? { LOEY_DONE_PERSONAL: '1' } : {})
+          ...(DONE_PERSONAL ? { LOEY_DONE_PERSONAL: '1' } : {}),
+          // The flag tokens were spliced out of argv at module load, so the child would
+          // otherwise see a plain `done` and write into today's note - silently undoing the
+          // back-dating this process was asked for.
+          ...(DONE_WHEN.date ? { LOEY_DONE_DATE: DONE_WHEN.date } : {}),
+          ...(DONE_WHEN.time ? { LOEY_DONE_TIME: DONE_WHEN.time } : {})
         }
       }
     );
@@ -1568,8 +1652,8 @@ function insertPersonalBullet(content, timeStr, message) {
   return lines.join('\n');
 }
 
-function logToDailyNote(message, synthetic = detectSynthetic()) {
-  const { dateStr, monthDir, timeStr } = getTodayInfo();
+function logToDailyNote(message, synthetic = detectSynthetic(), when = null) {
+  const { dateStr, monthDir, timeStr } = resolveWhen(when);
   const filePath = dailyNotePath(dateStr, monthDir);
   const rel = vaultRel(filePath);
 
@@ -1611,8 +1695,8 @@ function logToDailyNote(message, synthetic = detectSynthetic()) {
   }
 }
 
-function logToPersonal(message, synthetic = detectSynthetic()) {
-  const { dateStr, monthDir, timeStr } = getTodayInfo();
+function logToPersonal(message, synthetic = detectSynthetic(), when = null) {
+  const { dateStr, monthDir, timeStr } = resolveWhen(when);
   const filePath = dailyNotePath(dateStr, monthDir);
   const rel = vaultRel(filePath);
 
@@ -1725,10 +1809,10 @@ function pruneHandoffContent(content, maxUpdates = MAX_HANDOFF_UPDATES) {
   return { content: updatedContent, prunedCount: overflow.length };
 }
 
-function updateHandoff(message, synthetic = detectSynthetic()) {
+function updateHandoff(message, synthetic = detectSynthetic(), when = null) {
   const handoffPath = path.join(VAULT_DIR, 'handoff.md');
   const rel = vaultRel(handoffPath);
-  const { dateStr, timeStr } = getTodayInfo();
+  const { dateStr, timeStr } = resolveWhen(when);
 
   if (synthetic.synthetic) {
     console.log(`[heyloey] SKIPPED handoff - explicit synthetic opt-out (${synthetic.reason}); nothing written.`);
@@ -1766,7 +1850,9 @@ function updateHandoff(message, synthetic = detectSynthetic()) {
 
     const pruned = pruneHandoffContent(content, MAX_HANDOFF_UPDATES);
     content = pruned.content;
-    content = content.replace(/updated: \d{4}-\d{2}-\d{2}/, () => `updated: ${dateStr}`);
+    // `updated:` describes when the FILE was touched, which is now even for a back-dated entry:
+    // only the entry's own stamp names the moment the milestone happened.
+    content = content.replace(/updated: \d{4}-\d{2}-\d{2}/, () => `updated: ${getTodayInfo().dateStr}`);
 
     atomicWriteFileSync(handoffPath, content);
 
@@ -2265,14 +2351,29 @@ if (!fs.existsSync(VAULT_DIR)) {
 const prefix = getGitContext();
 const formattedMessage = rawMessage ? `${prefix}${cleanMessage(rawMessage)}` : '';
 
-// Agent milestones and owner entries take free text only. A flag used to be swallowed as part of
-// the text, which silently wrote `--personal` into the agent table; refuse instead of guessing.
+// `--date`/`--time` are consumed for done/milestone only. A command that takes free text would
+// otherwise swallow the pair as literal words and file a milestone under a title nobody chose, so
+// refuse it by name. migrate-log parses its own --date, hence the exemption.
+if (!['done', 'milestone', 'migrate-log'].includes(command)) {
+  const misfiled = ['--date', '--time'].filter((flag) => args.includes(flag));
+  if (misfiled.length) {
+    console.error(
+      `[heyloey] ${misfiled.join(' and ')} only apply to done/milestone (or migrate-log --date), not ${command}. Nothing written.`
+    );
+    process.exit(1);
+  }
+}
+
+// Agent milestones and owner entries take free text plus the flags consumed above. A flag used to
+// be swallowed as part of the text, which silently wrote `--personal` into the agent table; refuse
+// instead of guessing. `--personal`, `--date` and `--time` are already gone from argv, so anything
+// still matching here really is unsupported.
 if (['done', 'milestone', 'personal'].includes(command)) {
   const flags = args.slice(1).filter((arg) => arg.startsWith('--'));
   if (flags.length) {
     console.error(
       `[heyloey] Unsupported option(s) for ${command}: ${flags.join(', ')}.\n` +
-        '[heyloey] Agent milestones take free text only; use `heyloey personal "<entry>"` for an owner entry. Nothing written.'
+        '[heyloey] Agent milestones take free text only (plus --date <YYYY-MM-DD> and --time <HH:MM> on done); use `heyloey personal "<entry>"` for an owner entry. Nothing written.'
     );
     process.exit(1);
   }
@@ -2289,11 +2390,18 @@ function dryRunTarget(absolutePath) {
 
 /** Preview a writing command without taking the lock or touching a record. */
 function runDryRun() {
-  const { dateStr, monthDir, timeStr } = getTodayInfo();
+  // A preview must name the same record the real run would write, or it is a lie about the
+  // most consequential thing it reports: which note the entry lands in.
+  const { dateStr, monthDir, timeStr } = resolveWhen(DONE_WHEN);
   const dailyPath = dailyNotePath(dateStr, monthDir);
   const handoffPath = path.join(VAULT_DIR, 'handoff.md');
   const say = (line) => console.log(line);
   const header = (label) => say('[heyloey] DRY RUN - nothing written. Vault: ' + dryRunTarget(VAULT_DIR) + ' (' + label + ')');
+  const backDated = DONE_WHEN.date && DONE_WHEN.date !== getTodayInfo().dateStr;
+  if (backDated) {
+    say('[heyloey] back-dated: --date ' + DONE_WHEN.date + (DONE_WHEN.time ? ' --time ' + DONE_WHEN.time : '') +
+      ' (not today, ' + getTodayInfo().dateStr + ')');
+  }
   const requireFile = (file, label) => {
     if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8');
     console.error('[heyloey] REFUSED ' + label + ': ' + vaultRel(file) + ' is absent - ' + DAILY_NOTE_HINT + '; nothing written.');
@@ -2493,7 +2601,7 @@ async function dispatch() {
     if (DONE_PERSONAL) {
       // `done --personal` is the owner-entry shorthand: Personal Log only, never handoff.md.
       const synthetic = detectSynthetic();
-      const daily = logToPersonal(rawMessage, synthetic);
+      const daily = logToPersonal(rawMessage, synthetic, DONE_WHEN);
       const outcome =
         daily.status === 'written' ? 'logged' :
         daily.status === 'already-recorded' ? 'already-recorded' :
@@ -2507,7 +2615,7 @@ async function dispatch() {
       process.exit(OUTCOME_EXIT[outcome]);
     }
     const synthetic = detectSynthetic();
-    const { dateStr, monthDir } = getTodayInfo();
+    const { dateStr, monthDir } = resolveWhen(DONE_WHEN);
     const handoffPath = path.join(VAULT_DIR, 'handoff.md');
     const dailyPath = dailyNotePath(dateStr, monthDir);
     const { summary } = splitScopeAndSummary(formattedMessage);
@@ -2538,8 +2646,8 @@ async function dispatch() {
         reportOutcome('done', [['daily', daily], ['handoff', handoff]], 'refused', synthetic);
         return { refused: true };
       }
-      const daily = logToDailyNote(formattedMessage, synthetic);
-      const handoff = updateHandoff(formattedMessage, synthetic);
+      const daily = logToDailyNote(formattedMessage, synthetic, DONE_WHEN);
+      const handoff = updateHandoff(formattedMessage, synthetic, DONE_WHEN);
       // Success is reported ONLY after re-reading BOTH required records from disk
       // (still under the lock) and confirming the intended milestone is inside the
       // expected section of each.
@@ -2588,7 +2696,7 @@ async function dispatch() {
       process.exit(1);
     }
     const synthetic = detectSynthetic();
-    const daily = logToPersonal(rawMessage, synthetic);
+    const daily = logToPersonal(rawMessage, synthetic, DONE_WHEN);
     const outcome =
       daily.status === 'written' ? 'logged' :
       daily.status === 'already-recorded' ? 'already-recorded' :
@@ -2870,6 +2978,9 @@ Targeting:
                              has the same effect.
 
   --date <day>               With migrate-log: the daily note to separate (YYYY-MM-DD). Default: today.
+                             With done: the day the milestone happened, so a milestone replayed
+                             after midnight is filed in its own day's note. Default: today.
+  --time <HH:MM>             With done --date: the 24-hour clock time to record. Default: now.
   --select <time>            With migrate-log: move exactly one personal entry with this time, e.g. "09:21 AM".
   --select-summary <text>    With migrate-log: the same, by a unique substring of the summary.
   --dry-run                  With migrate-log: report what would move and write nothing.

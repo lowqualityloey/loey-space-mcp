@@ -225,14 +225,27 @@ fi
 # A milestone that cannot be written is queued here instead of being lost. The
 # queue lives inside the repository's own .git, so it survives the session that
 # failed to log it (${TMPDIR:-/tmp} may be a private tmpfs - see OUT_LOG above).
-# One record per line, <UTC stamp><TAB><summary>, appended BEFORE the CLI call so
-# a logger that is killed outright still leaves the milestone recoverable, and
-# replayed by the next commit whose write succeeds (drain_queue below).
+# One record per line, <UTC stamp><TAB><vault stamp><TAB><summary>, appended BEFORE
+# the CLI call so a logger that is killed outright still leaves the milestone
+# recoverable, and replayed by the next commit whose write succeeds (drain_queue).
+#
+# TWO stamps, deliberately. The UTC stamp is identity and ordering. The vault stamp
+# (Pacific/Auckland) is what a replay passes as `done --date/--time`, because the
+# daily note is filed by the vault calendar, not by whatever zone the shell that
+# made the commit happened to use. A two-field record is a legacy entry written
+# before the vault stamp existed: it has no usable local time, so a replay keeps the
+# old literal-prefix behaviour instead of guessing a day.
 QUEUE="$(git rev-parse --git-path heyloey-milestones.pending 2>/dev/null || printf "%s/heyloey-milestones.pending" "${TMPDIR:-/tmp}")"
 QUEUE_LOCK="${QUEUE}.lock"
 STAMP="$(date -u "+%Y-%m-%d %H:%M")"
+# TZ is set inline so the hook never depends on the host zone selection.
+STAMP_VAULT="$(TZ=Pacific/Auckland date "+%Y-%m-%d %H:%M" 2>/dev/null)"
+case "$STAMP_VAULT" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" "[0-9][0-9]:[0-9][0-9]) : ;;
+  *) STAMP_VAULT="$(date "+%Y-%m-%d %H:%M")" ;;
+esac
 QUEUE_MSG="$(printf "%s" "$MILESTONE" | tr "\t" " ")"
-RECORD="${STAMP}"$'\t'"${QUEUE_MSG}"
+RECORD="${STAMP}"$'\t'"${STAMP_VAULT}"$'\t'"${QUEUE_MSG}"
 
 # mkdir is the only atomic lock available on every filesystem this hook runs on.
 # The wait is bounded: a stale lock may delay the commit, never block it.
@@ -256,13 +269,13 @@ enqueue_record() {
   # cannot be cleared the milestone is still recorded - losing it would be the
   # one unrecoverable outcome this queue exists to prevent.
   if queue_lock; then
-    if ! printf "%s\t%s\n" "$STAMP" "$QUEUE_MSG" >>"$QUEUE" 2>/dev/null; then
+    if ! printf "%s\t%s\t%s\n" "$STAMP" "$STAMP_VAULT" "$QUEUE_MSG" >>"$QUEUE" 2>/dev/null; then
       printf '[heyloey hook] milestone NOT queued: cannot write %s.\n' "$QUEUE" >&2
     fi
     queue_unlock
     return 0
   fi
-  if printf "%s\t%s\n" "$STAMP" "$QUEUE_MSG" >>"$QUEUE" 2>/dev/null; then
+  if printf "%s\t%s\t%s\n" "$STAMP" "$STAMP_VAULT" "$QUEUE_MSG" >>"$QUEUE" 2>/dev/null; then
     printf '[heyloey hook] pending queue locked (%s); milestone recorded without the lock.\n' \
       "$QUEUE_LOCK" >&2
   else
@@ -341,21 +354,24 @@ if [ -n "$GATE_PROBLEM" ]; then
   exit 0
 fi
 
-# One caller for `done`, shared by the live path and the replay path, so both
-# get the same 30s bound and the same Windows argument-quoting.
+# One caller for `done`, shared by the live path and the replay path, so both get
+# the same 30s bound and the same Windows argument-quoting. Trailing arguments pass
+# straight through: that is how a replay supplies --date and --time.
 call_done() {
+  _cd_msg="$1"
+  shift
   if [ "$LOEY_HOOK_OS" = windows ]; then
     if command -v timeout >/dev/null 2>&1; then
       MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-        timeout 30 "${LOEY_CMD[@]}" done "$1" </dev/null >>"$OUT_LOG" 2>&1
+        timeout 30 "${LOEY_CMD[@]}" done "$_cd_msg" "$@" </dev/null >>"$OUT_LOG" 2>&1
     else
       MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-        "${LOEY_CMD[@]}" done "$1" </dev/null >>"$OUT_LOG" 2>&1
+        "${LOEY_CMD[@]}" done "$_cd_msg" "$@" </dev/null >>"$OUT_LOG" 2>&1
     fi
   elif command -v timeout >/dev/null 2>&1; then
-    timeout 30 "${LOEY_CMD[@]}" done "$1" </dev/null >>"$OUT_LOG" 2>&1
+    timeout 30 "${LOEY_CMD[@]}" done "$_cd_msg" "$@" </dev/null >>"$OUT_LOG" 2>&1
   else
-    "${LOEY_CMD[@]}" done "$1" </dev/null >>"$OUT_LOG" 2>&1
+    "${LOEY_CMD[@]}" done "$_cd_msg" "$@" </dev/null >>"$OUT_LOG" 2>&1
   fi
 }
 
@@ -365,9 +381,10 @@ run_logger() {
 
 # Replay queued milestones through the same `done` call. Only ever called after a
 # write has just succeeded, so the vault is proven writable and the CLI lock is
-# free. `done` has no --date and always targets TODAY in Pacific/Auckland, so the
-# UTC stamp captured at enqueue time is prefixed to the replayed summary: the row
-# stays honest about when the work actually happened.
+# free. Each record carries the Pacific/Auckland stamp taken at enqueue time and
+# that is passed as --date/--time, so a milestone queued at 23:50 and replayed at
+# 00:10 lands in the day it happened - the one thing a literal prefix could never
+# fix. A legacy two-field record has no local stamp, so it keeps the prefix.
 drain_queue() {
   [ -s "$QUEUE" ] || return 0
   queue_lock || return 0
@@ -380,28 +397,55 @@ drain_queue() {
   _dq_seen=0
   _dq_done=0
   _dq_left=0
-  while IFS="$(printf '\t')" read -r _r_stamp _r_msg; do
-    [ -n "${_r_msg:-}" ] || continue
+  while IFS="$(printf '\t')" read -r _r_stamp _r_vault _r_msg; do
+    [ -n "${_r_stamp:-}" ] || continue
+    # Two fields means a legacy record: the message sits in the second column.
+    # A second column that is itself a stamp is a three-field record with an empty
+    # message, which is not a milestone - skip it rather than replay a timestamp.
+    if [ -z "${_r_msg:-}" ]; then
+      case "$_r_vault" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" "[0-9][0-9]:[0-9][0-9]) continue ;;
+      esac
+      _r_msg="$_r_vault"
+      _r_vault=""
+    fi
     _dq_seen=$((_dq_seen + 1))
+    _r_day=""
+    _r_time=""
+    case "$_r_vault" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" "[0-9][0-9]:[0-9][0-9])
+        _r_day="${_r_vault%% *}"
+        _r_time="${_r_vault#* }" ;;
+    esac
     # Bounded: a large backlog drains over several commits instead of delaying
     # one commit by minutes.
     if [ "$_dq_seen" -gt 20 ]; then
-      printf "%s\t%s\n" "$_r_stamp" "$_r_msg" >>"$QUEUE" 2>/dev/null
+      printf "%s\t%s\t%s\n" "$_r_stamp" "$_r_vault" "$_r_msg" >>"$QUEUE" 2>/dev/null
       _dq_left=$((_dq_left + 1))
       continue
     fi
     # Already in the daily note - a partial write, or the owner fixed it by hand.
     # Never log one milestone twice, and never duplicate a row it already has.
-    if [ -f "$CHECK_ROOT/$NOTE_REL" ] \
-       && grep -Fq -e "$_r_msg" "$CHECK_ROOT/$NOTE_REL" 2>/dev/null; then
+    # The note checked is the record owned day, not today, or a back-dated replay
+    # would look absent every time and log itself twice.
+    _r_note="$NOTE_REL"
+    if [ -n "$_r_day" ]; then
+      _r_note="01-Daily/${_r_day%-*}/${_r_day}.md"
+    fi
+    if [ -f "$CHECK_ROOT/$_r_note" ] \
+       && grep -Fq -e "$_r_msg" "$CHECK_ROOT/$_r_note" 2>/dev/null; then
       _dq_done=$((_dq_done + 1))
       continue
     fi
-    call_done "[$_r_stamp] $_r_msg"
+    if [ -n "$_r_day" ]; then
+      call_done "$_r_msg" --date "$_r_day" --time "$_r_time"
+    else
+      call_done "[$_r_stamp] $_r_msg"
+    fi
     if [ "$?" -eq 0 ]; then
       _dq_done=$((_dq_done + 1))
     else
-      printf "%s\t%s\n" "$_r_stamp" "$_r_msg" >>"$QUEUE" 2>/dev/null
+      printf "%s\t%s\t%s\n" "$_r_stamp" "$_r_vault" "$_r_msg" >>"$QUEUE" 2>/dev/null
       _dq_left=$((_dq_left + 1))
     fi
   done <"$_dq_work"
