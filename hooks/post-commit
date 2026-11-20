@@ -1,0 +1,450 @@
+#!/usr/bin/env bash
+# post-commit — vault milestone logger, portable across WSL/Linux and Windows Git Bash.
+#
+# Installed as the Windows git template hook (~/.git-template/hooks/post-commit), so
+# new Windows repositories inherit it, and in the vault's own .git/hooks/.
+#
+# WHAT IT DOES
+# ------------
+# Reads the canonical opt-in trailer from the commit that just landed:
+#
+#     git commit -m "feat: ship the thing" -m "HeyLoey-Milestone: shipped the thing"
+#
+# and, only when that trailer carries a non-empty summary, calls
+#
+#     heyloey done "<summary>"
+#
+# synchronously, then reports the outcome. Ordinary commits write nothing at all.
+#
+# Parsing mirrors the published hook exactly: anchored at line start, CASE-
+# SENSITIVE `^HeyLoey-Milestone:`, first match wins, value trimmed of leading
+# spaces/tabs and trailing spaces/tabs/CR, leading `-`/whitespace then stripped so
+# it cannot be read as an option, and an EMPTY value is not an opt-in.
+#
+# WHY SYNCHRONOUS
+# ---------------
+# An earlier revision backgrounded the logger. A detached child is reparented the
+# instant the hook exits, and the process-group teardown that follows a tool-driven
+# `git commit` kills it before it writes, so the outcome existed nowhere: not in the
+# daily note, not in the handoff, not even in the log. `done` completes in about a
+# second. A 30s bound keeps a stalled vault mount from stalling the commit, and the
+# attempt header is written BEFORE the call, so even a hung logger leaves evidence
+# next to its commit.
+#
+# WINDOWS: WHY THIS HOOK DOES NOT USE `heyloey.cmd`
+# ------------------------------------------------
+# Measured in Git Bash (`C:\Program Files\Git\bin\bash.exe`), the shell a Windows
+# hook actually runs in:
+#
+#   * `heyloey` is NOT on PATH at all; Windows only exposes `heyloey.cmd`;
+#   * that shim is `wsl.exe -e /home/heyloey/.local/bin/heyloey %*`, which starts a
+#     FRESH WSL environment: `LOEY_SPACE_DIR` exported here is silently dropped, so
+#     the CLI reports `Vault: /home/heyloey/loey_space (source: default)`;
+#   * `heyloey` does not resolve under `wsl.exe -e` direct exec either (the default
+#     WSL PATH omits ~/.local/bin), and from a UNC cwd (`\\wsl.localhost\...`) the
+#     `.cmd` route fails outright.
+#
+# So on Windows this hook (a) addresses the WSL binary by absolute path, (b) passes
+# the vault override through `wsl.exe -e env ...` so it actually crosses the
+# boundary, and (c) sets MSYS_NO_PATHCONV / MSYS2_ARG_CONV_EXCL so MSYS does not
+# rewrite `/mnt/c/...` or `/home/...` into `C:/Program Files/Git/...` before WSL
+# sees them.
+#
+# The pre-check needs a Windows-visible spelling (`/c/Users/...`, not `/mnt/c/...`),
+# so the vault path is converted for that test only. When the vault is not mounted
+# at `/mnt/<drive>/` (for example a vault living inside the WSL filesystem), the
+# pre-check is skipped rather than guessed: a missing record then surfaces as the
+# CLI's own refusal (exit 4) instead of a false "absent in the vault" warning on
+# every commit.
+#
+# OUTCOME REPORTING
+# -----------------
+#   0    logged / already-recorded            -> silent unless LOEY_HOOK_VERBOSE=1
+#   3    synthetic opt-out (test)             -> note
+#   4    refused: a required record is absent -> warn
+#   5    partial write                        -> warn
+#   6    write failure, nothing changed       -> warn
+#   7    vault lock held by another writer    -> warn (retry later)
+#   8    kernel lock `flock` unavailable      -> warn
+#   9    legacy file-tier lock state          -> warn, operator review, nothing removed
+#   124  exceeded the time bound              -> warn, nothing written
+#   *    anything else, reported numerically  -> warn
+# The hook never fails a commit; it always exits 0.
+#
+# LOCK: the CLI serializes writes with `flock` and has no fallback protocol. Exits
+# 7/8/9 therefore mean the lock was not obtained and NOTHING was written. The hook
+# reports them and never works around them.
+#
+# Both required records are pre-checked. `done` needs TODAY's daily note and
+# handoff.md; checking only the daily note would let the logger refuse on every
+# commit for a missing handoff with no early explanation.
+
+set -u
+
+# Absolute path INSIDE WSL. Override with LOEY_WSL_CLI when the CLI lives elsewhere.
+LOEY_WSL_CLI="${LOEY_WSL_CLI:-/home/heyloey/.local/bin/heyloey}"
+VAULT="${LOEY_SPACE_DIR:-/mnt/c/Users/jonel/Documents/loey_space}"
+export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*) LOEY_HOOK_OS=windows ;;
+  *)                    LOEY_HOOK_OS=unix ;;
+esac
+
+# /mnt/c/Users/jonel  ->  /c/Users/jonel   (Windows-visible spelling, for tests)
+to_msys_path() {
+  case "$1" in
+    /mnt/[a-zA-Z]/*) printf '/%s/%s' "${1:5:1}" "${1:7}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# C:/Users/jonel and /c/Users/jonel  ->  /mnt/c/Users/jonel  (what the WSL CLI wants)
+to_wsl_path() {
+  case "$1" in
+    //wsl.localhost/*/*)
+      # //wsl.localhost/<distro>/home/... -> /home/...
+      _rest="${1#//wsl.localhost/}"
+      printf '/%s' "${_rest#*/}"
+      ;;
+    /mnt/*) printf '%s' "$1" ;;
+    /[a-zA-Z]/*) printf '/mnt%s' "$1" ;;
+    [a-zA-Z]:/*)
+      _drive="$(printf '%s' "${1:0:1}" | tr 'A-Z' 'a-z')"
+      printf '/mnt/%s%s' "$_drive" "${1:2}"
+      ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# `%B` is the raw body, so a trailer survives multi-paragraph messages. Parsing is
+# version-independent (no dependence on `%(trailers:...)`) and mirrors the
+# published hook: anchored, case-sensitive, first match wins.
+COMMIT_BODY="$(git log -1 --pretty=%B 2>/dev/null)" || exit 0
+[ -n "$COMMIT_BODY" ] || exit 0
+
+MILESTONE="$(
+  printf '%s\n' "$COMMIT_BODY" | awk '
+    /^HeyLoey-Milestone:/ {
+      value = substr($0, length("HeyLoey-Milestone:") + 1)
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t\r]+$/, "", value)
+      print value
+      exit
+    }
+  '
+)"
+
+# An empty trailer is not an opt-in: this is an ordinary commit, so write nothing.
+# Silent by default so ordinary commits add no noise to `git commit` output.
+if [ -z "$MILESTONE" ]; then
+  if [ "${LOEY_HOOK_VERBOSE:-0}" = "1" ]; then
+    printf '[heyloey hook] no "HeyLoey-Milestone:" trailer; ordinary commit, nothing logged.\n' >&2
+  fi
+  exit 0
+fi
+
+# A leading hyphen or whitespace would be read as an option by the CLI's argument
+# parser, so strip it rather than pass it through (mirrors the published hook).
+MILESTONE="$(printf '%s' "$MILESTONE" | sed -e 's/^[-[:space:]]*//')" || exit 0
+[ -n "$MILESTONE" ] || exit 0
+
+# Resolve HOW to call the CLI. On Windows the shell cannot see the WSL filesystem
+# and the .cmd shim loses the environment (see the header), so WSL is addressed
+# directly and the vault override is carried with `env`.
+if [ "$LOEY_HOOK_OS" = windows ]; then
+  VAULT="$(to_wsl_path "$VAULT")"
+  if ! command -v wsl.exe >/dev/null 2>&1; then
+    printf '[heyloey hook] milestone NOT logged: wsl.exe is not on PATH, so the vault CLI cannot be reached from this Windows shell; nothing written.\n' >&2
+    exit 0
+  fi
+  # A Windows worktree's .git file points at a //wsl.localhost/... gitdir, which
+  # git for Linux cannot resolve from /mnt/c/...; without this the CLI sees no
+  # repository and logs the project blank. Pass the translated git context in.
+  _git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
+  _git_wt="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  LOEY_ENV=("LOEY_SPACE_DIR=$VAULT")
+  if [ -n "$_git_dir" ] && [ -n "$_git_wt" ]; then
+    LOEY_ENV+=("GIT_DIR=$(to_wsl_path "$_git_dir")")
+    LOEY_ENV+=("GIT_WORK_TREE=$(to_wsl_path "$_git_wt")")
+  fi
+  LOEY_CMD=(wsl.exe -e env "${LOEY_ENV[@]}" "$LOEY_WSL_CLI")
+else
+  # Missing tooling is the expected state of a fresh clone, not an error to report.
+  if [ -x "${HOME}/.local/bin/heyloey" ]; then
+    LOEY_CMD=(env "LOEY_SPACE_DIR=$VAULT" "${HOME}/.local/bin/heyloey")
+  elif command -v heyloey >/dev/null 2>&1; then
+    LOEY_CMD=(env "LOEY_SPACE_DIR=$VAULT" heyloey)
+  else
+    exit 0
+  fi
+fi
+
+TODAY="$(date +%Y-%m-%d)"
+MONTH="$(date +%Y-%m)"
+NOTE_REL="01-Daily/$MONTH/$TODAY.md"
+HANDOFF_REL="handoff.md"
+
+if [ "$LOEY_HOOK_OS" = windows ]; then
+  CHECK_ROOT="$(to_msys_path "$VAULT")"
+else
+  CHECK_ROOT="$VAULT"
+fi
+
+# Both records are required by `done`. Report the missing one early, but only when
+# the vault is actually visible from this shell: a path Git Bash cannot stat would
+# otherwise produce a false "absent" warning on every milestone commit.
+if [ -d "$CHECK_ROOT" ]; then
+  if [ ! -f "$CHECK_ROOT/$NOTE_REL" ] || [ ! -f "$CHECK_ROOT/$HANDOFF_REL" ]; then
+    MISSING=""
+    [ -f "$CHECK_ROOT/$NOTE_REL" ] || MISSING="$NOTE_REL"
+    if [ ! -f "$CHECK_ROOT/$HANDOFF_REL" ]; then
+      [ -n "$MISSING" ] && MISSING="$MISSING and "
+      MISSING="${MISSING}${HANDOFF_REL}"
+    fi
+    printf '[heyloey hook] milestone NOT logged: %s is absent in the vault; nothing written.\n' \
+      "$MISSING" >&2
+    printf '[heyloey hook] create the daily note from 99-Templates/Daily.md (or run the vault'"'"'s morning flow).\n' >&2
+    exit 0
+  fi
+elif [ "${LOEY_HOOK_VERBOSE:-0}" = "1" ]; then
+  printf '[heyloey hook] vault not visible at %s from this shell; local pre-check skipped, `done` will report.\n' \
+    "$CHECK_ROOT" >&2
+fi
+
+# Prefer a log inside the repository: it survives a sandboxed session, a
+# crashed shell and a reboot. ${TMPDIR:-/tmp} may be a private tmpfs whose
+# contents are destroyed when the session ends, so it is only the fallback.
+OUT_LOG="$(git rev-parse --git-path heyloey-post-commit.log 2>/dev/null || echo /tmp/heyloey-post-commit.log)"
+if ! { : >>"$OUT_LOG"; } 2>/dev/null; then
+  OUT_LOG="${TMPDIR:-/tmp}/heyloey-post-commit.log"
+fi
+
+# PENDING QUEUE
+# -------------
+# A milestone that cannot be written is queued here instead of being lost. The
+# queue lives inside the repository's own .git, so it survives the session that
+# failed to log it (${TMPDIR:-/tmp} may be a private tmpfs - see OUT_LOG above).
+# One record per line, <UTC stamp><TAB><summary>, appended BEFORE the CLI call so
+# a logger that is killed outright still leaves the milestone recoverable, and
+# replayed by the next commit whose write succeeds (drain_queue below).
+QUEUE="$(git rev-parse --git-path heyloey-milestones.pending 2>/dev/null || printf "%s/heyloey-milestones.pending" "${TMPDIR:-/tmp}")"
+QUEUE_LOCK="${QUEUE}.lock"
+STAMP="$(date -u "+%Y-%m-%d %H:%M")"
+QUEUE_MSG="$(printf "%s" "$MILESTONE" | tr "\t" " ")"
+RECORD="${STAMP}"$'\t'"${QUEUE_MSG}"
+
+# mkdir is the only atomic lock available on every filesystem this hook runs on.
+# The wait is bounded: a stale lock may delay the commit, never block it.
+queue_lock() {
+  _ql_wait=0
+  while ! mkdir "$QUEUE_LOCK" 2>/dev/null; do
+    _ql_wait=$((_ql_wait + 1))
+    [ "$_ql_wait" -ge 20 ] && return 1
+    sleep 0.05
+  done
+  return 0
+}
+
+queue_unlock() {
+  rmdir "$QUEUE_LOCK" 2>/dev/null || true
+}
+
+enqueue_record() {
+  # A single short append is atomic on every filesystem this hook runs on, so the
+  # lock is an ordering nicety, not a correctness requirement. If a stale lock
+  # cannot be cleared the milestone is still recorded - losing it would be the
+  # one unrecoverable outcome this queue exists to prevent.
+  if queue_lock; then
+    if ! printf "%s\t%s\n" "$STAMP" "$QUEUE_MSG" >>"$QUEUE" 2>/dev/null; then
+      printf '[heyloey hook] milestone NOT queued: cannot write %s.\n' "$QUEUE" >&2
+    fi
+    queue_unlock
+    return 0
+  fi
+  if printf "%s\t%s\n" "$STAMP" "$QUEUE_MSG" >>"$QUEUE" 2>/dev/null; then
+    printf '[heyloey hook] pending queue locked (%s); milestone recorded without the lock.\n' \
+      "$QUEUE_LOCK" >&2
+  else
+    printf '[heyloey hook] milestone NOT queued: cannot write %s.\n' "$QUEUE" >&2
+  fi
+}
+
+# Remove exactly one record, so a run that logged cleanly never leaves a replay
+# behind. grep -vxF matches whole lines literally: no escaping of the summary.
+dequeue_record() {
+  [ -f "$QUEUE" ] || return 0
+  queue_lock || return 0
+  _dq_want="${QUEUE}.$$.want"
+  _dq_tmp="${QUEUE}.$$.tmp"
+  _dq_ok=1
+  printf "%s\n" "$1" >"$_dq_want" 2>/dev/null || _dq_ok=0
+  if [ "$_dq_ok" = 1 ]; then
+    # grep exits 1 when the filter leaves no lines - an empty queue is SUCCESS,
+    # not a failure, so the status is inspected instead of used as the condition.
+    grep -vxF -f "$_dq_want" "$QUEUE" >"$_dq_tmp" 2>/dev/null
+    case "$?" in
+      0|1) mv "$_dq_tmp" "$QUEUE" 2>/dev/null || rm -f "$_dq_tmp" ;;
+      *)   rm -f "$_dq_tmp" ;;
+    esac
+  fi
+  rm -f "$_dq_want"
+  queue_unlock
+}
+
+# Written before the call so a logger that hangs or dies still leaves evidence of
+# the attempt next to its commit. Only the CLI's output is redirected; the status
+# messages below go to the real stderr.
+printf '\n[%s] commit %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" >>"$OUT_LOG"
+
+# PRE-FLIGHT WRITABILITY GATE
+# ---------------------------
+# The existence check above cannot see a read-only mount: under a sandbox that
+# binds the vault read-only both records are present but unwritable, so `done`
+# burns the full 30s bound and returns exit 6 having changed nothing. Probe with
+# real create and append operations - the permission bit alone misses some
+# virtiofs and network mounts - and queue the milestone instead of calling.
+probe_dir_writable() {
+  [ -d "$1" ] || return 1
+  [ -w "$1" ] || return 1
+  _pd="$1/.heyloey-write-probe.$$"
+  { : >"$_pd"; } 2>/dev/null || return 1
+  rm -f "$_pd" 2>/dev/null || return 1
+  return 0
+}
+
+# Opening for append writes no bytes, but a read-only mount fails it with EROFS.
+probe_file_writable() {
+  [ -f "$1" ] || return 1
+  [ -w "$1" ] || return 1
+  { : >>"$1"; } 2>/dev/null || return 1
+  return 0
+}
+
+GATE_PROBLEM=""
+if [ -d "$CHECK_ROOT" ]; then
+  if ! probe_dir_writable "$CHECK_ROOT"; then
+    GATE_PROBLEM="the vault root $CHECK_ROOT is not writable from this shell"
+  elif ! probe_dir_writable "$CHECK_ROOT/01-Daily/$MONTH"; then
+    GATE_PROBLEM="the daily-note directory 01-Daily/$MONTH is not writable from this shell"
+  elif ! probe_file_writable "$CHECK_ROOT/$NOTE_REL"; then
+    GATE_PROBLEM="$NOTE_REL is not writable from this shell"
+  elif ! probe_file_writable "$CHECK_ROOT/$HANDOFF_REL"; then
+    GATE_PROBLEM="$HANDOFF_REL is not writable from this shell"
+  fi
+fi
+
+if [ -n "$GATE_PROBLEM" ]; then
+  enqueue_record
+  printf '[heyloey hook] milestone queued, not logged now: %s. The next commit that can write replays it from %s.\n' \
+    "$GATE_PROBLEM" "$QUEUE" >&2
+  exit 0
+fi
+
+# One caller for `done`, shared by the live path and the replay path, so both
+# get the same 30s bound and the same Windows argument-quoting.
+call_done() {
+  if [ "$LOEY_HOOK_OS" = windows ]; then
+    if command -v timeout >/dev/null 2>&1; then
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+        timeout 30 "${LOEY_CMD[@]}" done "$1" </dev/null >>"$OUT_LOG" 2>&1
+    else
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+        "${LOEY_CMD[@]}" done "$1" </dev/null >>"$OUT_LOG" 2>&1
+    fi
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout 30 "${LOEY_CMD[@]}" done "$1" </dev/null >>"$OUT_LOG" 2>&1
+  else
+    "${LOEY_CMD[@]}" done "$1" </dev/null >>"$OUT_LOG" 2>&1
+  fi
+}
+
+run_logger() {
+  call_done "$MILESTONE"
+}
+
+# Replay queued milestones through the same `done` call. Only ever called after a
+# write has just succeeded, so the vault is proven writable and the CLI lock is
+# free. `done` has no --date and always targets TODAY in Pacific/Auckland, so the
+# UTC stamp captured at enqueue time is prefixed to the replayed summary: the row
+# stays honest about when the work actually happened.
+drain_queue() {
+  [ -s "$QUEUE" ] || return 0
+  queue_lock || return 0
+  _dq_work="${QUEUE}.$$.work"
+  if ! mv "$QUEUE" "$_dq_work" 2>/dev/null; then
+    queue_unlock
+    return 0
+  fi
+  : >"$QUEUE" 2>/dev/null || rm -f "$QUEUE"
+  _dq_seen=0
+  _dq_done=0
+  _dq_left=0
+  while IFS="$(printf '\t')" read -r _r_stamp _r_msg; do
+    [ -n "${_r_msg:-}" ] || continue
+    _dq_seen=$((_dq_seen + 1))
+    # Bounded: a large backlog drains over several commits instead of delaying
+    # one commit by minutes.
+    if [ "$_dq_seen" -gt 20 ]; then
+      printf "%s\t%s\n" "$_r_stamp" "$_r_msg" >>"$QUEUE" 2>/dev/null
+      _dq_left=$((_dq_left + 1))
+      continue
+    fi
+    # Already in the daily note - a partial write, or the owner fixed it by hand.
+    # Never log one milestone twice, and never duplicate a row it already has.
+    if [ -f "$CHECK_ROOT/$NOTE_REL" ] \
+       && grep -Fq -e "$_r_msg" "$CHECK_ROOT/$NOTE_REL" 2>/dev/null; then
+      _dq_done=$((_dq_done + 1))
+      continue
+    fi
+    call_done "[$_r_stamp] $_r_msg"
+    if [ "$?" -eq 0 ]; then
+      _dq_done=$((_dq_done + 1))
+    else
+      printf "%s\t%s\n" "$_r_stamp" "$_r_msg" >>"$QUEUE" 2>/dev/null
+      _dq_left=$((_dq_left + 1))
+    fi
+  done <"$_dq_work"
+  rm -f "$_dq_work"
+  queue_unlock
+  if [ "$_dq_seen" -gt 0 ]; then
+    printf '[heyloey hook] pending queue: %s replayed, %s still queued (%s).\n' \
+      "$_dq_done" "$_dq_left" "$QUEUE" >&2
+  fi
+  return 0
+}
+
+# Queued BEFORE the call: a hook killed mid-call still leaves the milestone
+# recoverable. A clean run removes the record again a few lines below.
+enqueue_record
+run_logger
+status=$?
+
+case "$status" in
+  0)  # logged / already-recorded
+      dequeue_record "$RECORD"
+      drain_queue
+      [ "${LOEY_HOOK_VERBOSE:-0}" = "1" ] && \
+        printf '[heyloey hook] milestone logged via `done`; see %s\n' "$OUT_LOG" >&2
+      ;;
+  1)  if [ "$LOEY_HOOK_OS" = windows ] \
+          && tail -n 5 "$OUT_LOG" 2>/dev/null | grep -q 'execvpe'; then
+        printf '[heyloey hook] milestone NOT logged: no CLI at %s inside WSL (set LOEY_WSL_CLI); see %s\n' \
+          "$LOEY_WSL_CLI" "$OUT_LOG" >&2
+      else
+        printf '[heyloey hook] milestone logging failed (exit 1); see %s\n' "$OUT_LOG" >&2
+      fi
+      ;;
+  3) dequeue_record "$RECORD"
+     printf '[heyloey hook] milestone skipped (exit 3, synthetic opt-out); see %s\n' "$OUT_LOG" >&2 ;;
+  4) printf '[heyloey hook] milestone refused (exit 4, a required record is absent); see %s\n' "$OUT_LOG" >&2 ;;
+  5) printf '[heyloey hook] milestone partially written (exit 5); the entry is kept in %s and replayed by the next writable commit; see %s\n' "$QUEUE" "$OUT_LOG" >&2 ;;
+  6) printf '[heyloey hook] milestone NOT logged now: the write failed and no record changed (exit 6); queued in %s for replay by the next writable commit; see %s\n' "$QUEUE" "$OUT_LOG" >&2 ;;
+  7) printf '[heyloey hook] milestone NOT logged (exit 7, another process held the vault lock); the commit is unaffected; see %s\n' "$OUT_LOG" >&2 ;;
+  8) printf '[heyloey hook] milestone NOT logged (exit 8, the required kernel lock `flock` is unavailable or the lock configuration names the removed file tier); see %s\n' "$OUT_LOG" >&2 ;;
+  9) printf '[heyloey hook] milestone NOT logged (exit 9, legacy file-tier lock state is present: operator review required, nothing was written); see %s\n' "$OUT_LOG" >&2 ;;
+  124) printf '[heyloey hook] milestone NOT logged (exit 124, `done` exceeded the 30s bound; nothing was written and the commit is unaffected); see %s\n' "$OUT_LOG" >&2 ;;
+  *) printf '[heyloey hook] milestone logging failed (exit %s); see %s\n' "$status" "$OUT_LOG" >&2 ;;
+esac
+
+exit 0

@@ -9,12 +9,14 @@
     "bin/",
     "src/",
     "canonical/",
+    "hooks/",
     "clients/",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "install:cli": "node tools/install-cli.mjs",
+    "install:hook": "node tools/install-hook.mjs",
     "test": "node --test test/test-safe-mcp.mjs",
     "test:integration": "node --test test/test-integration.mjs",
     "test:install": "node --test test/test-install-cli.mjs",

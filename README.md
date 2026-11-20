@@ -83,8 +83,11 @@ loey-space-mcp/
 │   ├── test-install-hook.mjs        # 3 trailer-gated post-commit hook tests
 │   ├── test-escaping-dedupe.mjs     # 3 escaping and exact-dedupe tests
 │   └── test-search-engine.mjs       # 2 engine/CLI parity tests
+├── hooks/
+│   └── post-commit                  # Tracked source of the portable vault-milestone hook
 ├── tools/
-│   └── install-cli.mjs              # Idempotent installer for the installed `heyloey` command
+│   ├── install-cli.mjs              # Idempotent installer for the installed `heyloey` command
+│   └── install-hook.mjs             # Idempotent installer for the post-commit hook
 ├── docs/
 │   └── cli-unification-plan.md      # Proposed consolidation of the CLI implementations
 ├── LICENSE                          # MIT
@@ -116,6 +119,56 @@ The installer links `~/.local/bin/heyloey` to this checkout's canonical CLI, so 
 - `--dest <path>` installs elsewhere; `--dry-run` reports without writing.
 
 If the checkout moves, the link breaks. Re-run the installer from the new location rather than recreating the command by hand.
+
+---
+
+## 🪝 Installing the vault-milestone post-commit hook
+
+`hooks/post-commit` is the single tracked source of the hook that logs a milestone into the vault
+when a commit carries a `HeyLoey-Milestone:` trailer. Install it into the user-level git template so
+every new repository inherits it:
+
+```bash
+npm run install:hook
+```
+
+The target is `~/.git-template/hooks/post-commit`. `--repo <path>` installs into one existing
+repository instead, resolving its hook directory through `git rev-parse --git-path hooks` so a
+custom `core.hooksPath` is honoured. `--dry-run` reports without writing; `--help` lists the options.
+
+What the hook guarantees, and why each part exists:
+
+- **A commit is never blocked.** Every path exits 0. Only a commit whose message carries a non-empty
+  `HeyLoey-Milestone:` trailer reaches the logger, and that call is bounded at 30 seconds.
+- **A milestone is never lost to a read-only vault.** Before calling the CLI it probes the vault root,
+  the month directory, the daily note and `handoff.md` for real writability. When any of them is
+  unreachable — a read-only mount, a sandbox that scopes writes elsewhere — the milestone is queued
+  in `.git/heyloey-milestones.pending` and exits 0, and the next commit that can write replays it
+  through the same code path.
+- **A replay is honest about when it happened.** Each queued record keeps its original UTC stamp, so a
+  milestone queued before midnight is logged as `[YYYY-MM-DD HH:MM] summary` rather than silently
+  claimed as today's work.
+- **A replay never duplicates.** A record already present in the daily note is dropped instead of
+  written twice, so a partial write or a hand-fix does not produce two rows.
+- **A stale queue lock delays, never drops.** The lock is a bounded `mkdir`; if it is held, the record
+  is still appended without it, because a short append is atomic and losing the milestone is the one
+  unrecoverable outcome.
+
+Installation is idempotent and non-destructive:
+
+- A target already identical to the tracked hook is left alone (its executable bit is re-asserted, since
+  git silently skips a non-executable hook).
+- A target this installer did not write — anything without its marker line — is refused unless
+  `--force` is given.
+- The previous hook is copied to `~/.local/state/heyloey/hook-backups/post-commit.bak` before it is
+  replaced. The backup is deliberately kept **outside** the template directory: git copies every file
+  in a template's `hooks/` folder into each new repository, so a backup left there would end up in
+  every future `.git/hooks`.
+- The swap is a single atomic `rename`, so an interrupted install leaves either the old hook or the
+  new one and never half of one.
+
+Edit `hooks/post-commit` here, never an installed copy: the installed file is an artifact and a
+re-image of the machine discards it.
 
 ---
 
