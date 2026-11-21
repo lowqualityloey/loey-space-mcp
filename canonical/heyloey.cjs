@@ -1913,6 +1913,113 @@ function findStaleTasksInContent(dailyContent, handoffContent, todayDate) {
   return stale;
 }
 
+// --- Reconciler health ------------------------------------------------------
+// The GitHub milestone reconciler runs from cron, so nothing on the interactive path
+// would ever notice it stopping: a dead tick, a failed tick and a drifted readiness
+// receipt all leave behind the same quiet file nobody opens. This reads that state and
+// states it as a maintenance alert. Warn-only by design - it never writes, never
+// refreshes readiness, and certification stays the exclusive job of --enable.
+const RECONCILER_CONFIG = '.github-milestone-repositories.json';
+const RECONCILER_STALE_MS = 2 * 60 * 60 * 1000;
+
+function loadReconcilerModule() {
+  // The reconciler owns both its log location and its readiness classifier. Requiring it
+  // means this alert and the commit refusal can never disagree about the same state.
+  try {
+    return require(path.join(VAULT_DIR, '06-Resources/scripts/reconcile-github-milestones.mjs'));
+  } catch (_) {
+    return null; // an older vault without the integration is not drift
+  }
+}
+
+function reconcilerLogPath(reconcilerModule) {
+  // Prefer the reconciler's own answer; the fallback only matters for a vault whose copy
+  // predates that export, and it mirrors what the installed cron line resolves.
+  if (reconcilerModule && typeof reconcilerModule.reconcileLogPath === 'function') {
+    return reconcilerModule.reconcileLogPath();
+  }
+  if (process.env.LOEY_RECONCILE_LOG) return process.env.LOEY_RECONCILE_LOG;
+  const stateHome = process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state');
+  return path.join(stateHome, 'heyloey', 'reconcile.log');
+}
+
+function displayPath(target) {
+  const home = os.homedir();
+  return home && target.startsWith(home + path.sep) ? '~' + target.slice(home.length) : target;
+}
+
+function describeAge(ms) {
+  const minutes = Math.max(1, Math.round(ms / 60000));
+  if (minutes < 90) return minutes + ' min';
+  if (minutes < 36 * 60) return (minutes / 60).toFixed(1) + 'h';
+  return (minutes / 1440).toFixed(1) + 'd';
+}
+
+function latestReconcileResult(text) {
+  const lines = String(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].startsWith('RESULT reconcile ')) return lines[i];
+  }
+  return null;
+}
+
+// Only the two outcomes that mean the scan completed count as clean. 'skipped',
+// 'failed' and a lock refusal are all work the run did not do.
+function isCleanReconcileResult(line) {
+  return /^RESULT reconcile (logged|unchanged) /.test(line);
+}
+
+function reconcilerHealthAlerts(alerts) {
+  // A vault that declares no repositories has not opted into this integration, so a
+  // missing log there is configuration, not rot. Silence is the honest answer.
+  if (!fs.existsSync(path.join(VAULT_DIR, RECONCILER_CONFIG))) return;
+
+  const reconcilerModule = loadReconcilerModule();
+  const logPath = reconcilerLogPath(reconcilerModule);
+  let logText = null;
+  let logAge = null;
+  try {
+    if (fs.existsSync(logPath)) {
+      logText = fs.readFileSync(logPath, 'utf8');
+      logAge = Date.now() - fs.statSync(logPath).mtimeMs;
+    }
+  } catch (_) {
+    logText = null;
+    logAge = null;
+  }
+
+  if (logText === null) {
+    alerts.push('⚠️ RECONCILER: no run recorded yet (' + displayPath(logPath) + ') - check "crontab -l"');
+  } else {
+    const result = latestReconcileResult(logText);
+    if (!result) {
+      alerts.push('⚠️ RECONCILER: ' + displayPath(logPath) + ' holds no RESULT line - the tick never completed');
+    } else if (!isCleanReconcileResult(result)) {
+      // One alert per condition: a run that failed 4 hours ago is reported as failed,
+      // not also as stale, so the reason is never buried under a second complaint.
+      const reason = result.replace(/^RESULT reconcile /, '');
+      alerts.push('⚠️ RECONCILER: last run did not finish cleanly - ' + (reason.length > 140 ? reason.slice(0, 137) + '...' : reason));
+    } else if (logAge !== null && logAge > RECONCILER_STALE_MS) {
+      alerts.push('⚠️ RECONCILER: no run for ' + describeAge(logAge) + ' (hourly cron expected; ' + displayPath(logPath) + ')');
+    }
+  }
+
+  // The receipt is classified by the reconciler's own module, never re-derived here.
+  try {
+    if (reconcilerModule && typeof reconcilerModule.readinessReport === 'function') {
+      const report = reconcilerModule.readinessReport(VAULT_DIR);
+      if (!report.ready) {
+        const affected = [].concat(report.drifted || [], report.missing || [], report.onlyInReceipt || []);
+        const named = affected.slice(0, 2).join(', ') + (affected.length > 2 ? ' (+' + (affected.length - 2) + ' more)' : '');
+        alerts.push('⚠️ RECONCILER: source verification ' + report.state + (named ? ' - ' + named : '') +
+          '; the next commit refuses until "npm run reconcile-github -- --enable"');
+      }
+    }
+  } catch (_) {
+    // An older vault without the module cannot be compared, so it is not reported as drift.
+  }
+}
+
 function generateBrief(includeKiwiSoul = false) {
   const { dateStr, monthDir } = getTodayInfo();
   const memPath = path.join(VAULT_DIR, 'memory.md');
@@ -2062,6 +2169,8 @@ function generateBrief(includeKiwiSoul = false) {
       alerts.push(`⚠️ STALE TASK: "${stale.text}" (${stale.days}d old)`);
     }
   }
+
+  reconcilerHealthAlerts(alerts);
 
   if (alerts.length > 0) {
     out.push('\n[MAINTENANCE ALERTS]');
