@@ -29,7 +29,8 @@
     "test:date": "node --test test/test-done-date.mjs",
     "test:queue": "node --test test/test-hook-queue.mjs",
     "test:health": "node --test test/test-reconciler-health.mjs",
-    "test:all": "node --test test/test-safe-mcp.mjs test/test-integration.mjs test/test-install-cli.mjs test/test-install-hook.mjs test/test-escaping-dedupe.mjs test/test-search-engine.mjs test/test-cli-root.mjs test/test-dry-run.mjs test/test-migrate-log.mjs test/test-done-date.mjs test/test-hook-queue.mjs test/test-reconciler-health.mjs"
+    "test:all": "node --test test/test-safe-mcp.mjs test/test-integration.mjs test/test-install-cli.mjs test/test-install-hook.mjs test/test-escaping-dedupe.mjs test/test-search-engine.mjs test/test-cli-root.mjs test/test-dry-run.mjs test/test-migrate-log.mjs test/test-done-date.mjs test/test-hook-queue.mjs test/test-hook-coordination.mjs test/test-reconciler-health.mjs",
+    "test:coord": "node --test test/test-hook-coordination.mjs"
   },
   "engines": {
     "node": ">=20"

@@ -1,332 +1,470 @@
 #!/usr/bin/env bash
-# post-commit — vault milestone logger, portable across WSL/Linux and Windows Git Bash.
 #
-# Installed as the Windows git template hook (~/.git-template/hooks/post-commit), so
-# new Windows repositories inherit it, and in the vault's own .git/hooks/.
+# post-commit — records an opted-in milestone in today's daily note and in handoff.md.
 #
-# WHAT IT DOES
-# ------------
-# Reads the canonical opt-in trailer from the commit that just landed:
+# Why this hook exists: the outcome of a session is worth keeping, and the moment it is known is
+# usually the moment it is committed. Those two records are what a later session reads, so this is
+# where an entry belongs.
 #
-#     git commit -m "feat: ship the thing" -m "HeyLoey-Milestone: shipped the thing"
+# Activate once per clone — git hooks are inactive until you do:
+#     git config --local core.hooksPath .githooks
 #
-# and, only when that trailer carries a non-empty summary, calls
+# Opting in is deliberate. A commit is logged ONLY when its message carries this trailer:
 #
-#     heyloey done "<summary>"
+#     HeyLoey-Milestone: <one-line summary>
 #
-# synchronously, then reports the outcome. Ordinary commits write nothing at all.
+# Nothing else is ever logged. A commit without the trailer is a silent no-op here, which is what
+# keeps the daily log a record of milestones rather than a copy of 'git log' (AGENTS.md,
+# "Milestone-Only Logging Policy"). The trailer body is the logged summary; the commit subject is
+# deliberately NOT used, because a subject describes work in progress and the log records outcomes.
+# An empty trailer is not an opt-in.
 #
-# Parsing mirrors the published hook exactly: anchored at line start, CASE-
-# SENSITIVE `^HeyLoey-Milestone:`, first match wins, value trimmed of leading
-# spaces/tabs and trailing spaces/tabs/CR, leading `-`/whitespace then stripped so
-# it cannot be read as an option, and an EMPTY value is not an opt-in.
+# Eligibility is the trailer and nothing else. A model-based classifier was prototyped in this file
+# during Milestone 3 and removed at the owner's direction: measured against daily-log summaries it
+# ranked chores above milestones as often as below, and the same text scored differently per run
+# (docs/tests/2026-10-12-test-post-commit-hook.md keeps the table). A gate that can withhold a real
+# milestone at random is worse than no gate — so nothing here consults a model, and the only tools
+# this hook needs are 'git', 'node' and the repository's own bundle.
 #
-# WHY SYNCHRONOUS
-# ---------------
-# An earlier revision backgrounded the logger. A detached child is reparented the
-# instant the hook exits, and the process-group teardown that follows a tool-driven
-# `git commit` kills it before it writes, so the outcome existed nowhere: not in the
-# daily note, not in the handoff, not even in the log. `done` completes in about a
-# second. A 30s bound keeps a stalled vault mount from stalling the commit, and the
-# attempt header is written BEFORE the call, so even a hung logger leaves evidence
-# next to its commit.
+# Fail-open, always. This hook never changes a commit's outcome:
+#   - no Node and no 'heyloey' on PATH -> silent skip
+#   - today's daily note or handoff absent -> the logger refuses; reported, never fatal
+#   - the logger errors, hangs, or refuses to die -> reported, never fatal
+#   - coordination or a bound cannot be arranged -> the entry is skipped with a notice
+# 'git commit' has already written the commit object by the time this runs, so a non-zero exit here
+# could only produce a confusing failure after the fact. Every step is guarded individually; the
+# hook exits 0 on every path except an explicit SIGINT/SIGTERM, where it exits 128+signal after
+# cleaning up (git ignores a post-commit exit status, so the commit still stands). The pre-commit
+# hook is the opposite — it blocks, and it stays that way.
 #
-# WINDOWS: WHY THIS HOOK DOES NOT USE `heyloey.cmd`
-# ------------------------------------------------
-# Measured in Git Bash (`C:\Program Files\Git\bin\bash.exe`), the shell a Windows
-# hook actually runs in:
+# The tool it prefers is the repository-local bundle ('06-Resources/scripts/heyloey.js'), reached
+# through 'node'. A global 'heyloey' on PATH is the fallback, and when neither exists the hook does
+# nothing. The vault is named explicitly with '--root', never guessed, so the entry lands in the
+# named vault's records and not in whichever vault happens to be current.
 #
-#   * `heyloey` is NOT on PATH at all; Windows only exposes `heyloey.cmd`;
-#   * that shim is `wsl.exe -e /home/heyloey/.local/bin/heyloey %*`, which starts a
-#     FRESH WSL environment: `LOEY_SPACE_DIR` exported here is silently dropped, so
-#     the CLI reports `Vault: /home/heyloey/loey_space (source: default)`;
-#   * `heyloey` does not resolve under `wsl.exe -e` direct exec either (the default
-#     WSL PATH omits ~/.local/bin), and from a UNC cwd (`\\wsl.localhost\...`) the
-#     `.cmd` route fails outright.
+# THE VAULT IS NAMED EXPLICITLY, IN ONE PLACE. VAULT_ROOT is resolved once, in this order:
+# LOEY_SPACE_DIR, then 'git config heyloey.vault', then this repository's own root. A portable clone
+# therefore logs into itself, and a code repository that commits into a separate vault says so once
+# with 'git config heyloey.vault <path>' rather than relying on an environment variable being set.
+# Nothing is ever guessed from the machine: no home directory, no default vault path.
 #
-# So on Windows this hook (a) addresses the WSL binary by absolute path, (b) passes
-# the vault override through `wsl.exe -e env ...` so it actually crosses the
-# boundary, and (c) sets MSYS_NO_PATHCONV / MSYS2_ARG_CONV_EXCL so MSYS does not
-# rewrite `/mnt/c/...` or `/home/...` into `C:/Program Files/Git/...` before WSL
-# sees them.
+# WINDOWS. From Git Bash the repository bundle is reachable through a Windows 'node', and
+# '--dry-run' renders the rows, but every write is refused with exit 8: the CLI serialises with
+# 'flock', which native Windows does not have. The route that can write is the CLI inside WSL,
+# addressed directly ('wsl.exe -e env LOEY_SPACE_DIR=<vault> ... done'), because 'wsl.exe -e' starts
+# a fresh environment and would otherwise drop the vault name. Without 'wsl.exe' the hook falls back
+# to the documented order, and a refused write is reported rather than absorbed.
 #
-# The pre-check needs a Windows-visible spelling (`/c/Users/...`, not `/mnt/c/...`),
-# so the vault path is converted for that test only. When the vault is not mounted
-# at `/mnt/<drive>/` (for example a vault living inside the WSL filesystem), the
-# pre-check is skipped rather than guessed: a missing record then surfaces as the
-# CLI's own refusal (exit 4) instead of a false "absent in the vault" warning on
-# every commit.
+# PATH IS NEVER MODIFIED. An earlier version prefixed '~/.local/bin' and '~/.cargo/bin' onto PATH,
+# which can shadow the caller's own tools for the duration of the hook. Tools are looked up with
+# 'command -v' and used as the caller's environment defines them. The logger is started directly,
+# never wrapped in an 'env PATH=...' shim, so the child sees exactly the PATH the committer had.
 #
-# OUTCOME REPORTING
-# -----------------
-#   0    logged / already-recorded            -> silent unless LOEY_HOOK_VERBOSE=1
-#   3    synthetic opt-out (test)             -> note
-#   4    refused: a required record is absent -> warn
-#   5    partial write                        -> warn
-#   6    write failure, nothing changed       -> warn
-#   7    vault lock held by another writer    -> warn (retry later)
-#   8    kernel lock `flock` unavailable      -> warn
-#   9    legacy file-tier lock state          -> warn, operator review, nothing removed
-#   124  exceeded the time bound              -> warn, nothing written
-#   *    anything else, reported numerically  -> warn
-# The hook never fails a commit; it always exits 0.
+# BOUNDED EXECUTION, ONE PATH. Every logger run — the live one and every replay — is started as a
+# child of this shell and bounded here, with a hard escalation ladder: at the bound it is sent TERM,
+# given TERM_GRACE_SECS, then KILLed, and always 'wait'ed for so it is reaped and cannot outlive the
+# hook. The effective bound is therefore bound + grace (+ the one-second poll). 'timeout(1)' is
+# deliberately NOT used: a TERM-only 'timeout' hangs forever on a logger that ignores TERM, and
+# 'timeout -k' is GNU-only, so relying on it would make the hard bound platform-dependent. The only
+# tool needed is 'sleep(1)'; where that is missing there is no way to bound the run, so logging is
+# skipped with a notice — a hung logger must never be able to hold a commit open. The logger's
+# output goes to a file inside the Git directory rather than a pipe, so a process killed mid-write
+# cannot keep the hook waiting.
 #
-# LOCK: the CLI serializes writes with `flock` and has no fallback protocol. Exits
-# 7/8/9 therefore mean the lock was not obtained and NOTHING was written. The hook
-# reports them and never works around them.
+# INTERRUPTION IS ORDERED. INT and TERM are trapped. The logger is terminated and reaped FIRST, and
+# only then is coordination state released, so an interrupted hook can never leave a live writer
+# behind holding a freed lock. After the cleanup the hook exits explicitly with 128+signal.
 #
-# Both required records are pre-checked. `done` needs TODAY's daily note and
-# handoff.md; checking only the daily note would let the logger refuse on every
-# commit for a missing handoff with no early explanation.
+# SERIALIZATION. The duplicate check, the logging run and the ledger update are one critical section,
+# guarded by a 'mkdir' lock beside the ledger ('git rev-parse --git-path heyloey-milestones.lock').
+# 'mkdir' is atomic on every filesystem this vault runs on, including Git Bash, and needs no
+# dependency. Scope is the working tree, which is the same scope as the records being protected: a
+# working tree is the vault 'done' writes into, while two clones keep separate trees and separate
+# daily notes. Git's index lock is deliberately NOT relied on: it does not cover two hooks started
+# from one commit loop, and it says nothing about a second checkout of the same vault.
+#
+# A LIVE HOLDER IS NEVER STOLEN, AND NEVER BY AGE. A lock is reclaimed only for a holder that is
+# provably gone, established by its recorded pid: 'kill -0' on that pid has to fail. An unreadable or
+# alive pid means safety cannot be established, so the entry is skipped with a notice rather than
+# guessed at — age is reported in that notice (against the longest a bounded run can hold the lock,
+# derived from the configured bounds, not a fixed 120s) to make manual recovery possible, but age
+# alone never removes a lock. That is what keeps a long configured bound safe from a short sweep.
+#
+# THE WRITER OUTLIVES THE HOOK, SO ITS DEATH IS NOT THE TEST. A hook killed with SIGKILL runs no
+# cleanup at all, which means its logger can still be alive and writing to the daily note while the
+# hook's own pid is provably dead. Reclaiming on the hook's death alone would hand the lock to a
+# second writer while the first was mid-write. The lock therefore records the writer as well, in three
+# states: 'none', written the moment the lock is taken and before any fork; 'pending', written
+# immediately before the fork; and the writer's pid, written immediately after it. A reclaim needs the
+# hook AND the writer to be provably gone. A 'pending', missing or unrecognised writer record means
+# recovery cannot be established, so the entry is skipped with a notice naming the lock and the
+# recovery: stop the surviving writer, look for a partial entry, then re-run. Both critical writes are
+# preconditions, never best-effort — a run that cannot record the writer does not start one, because a
+# lock that hides a live writer is the failure this whole mechanism exists to prevent.
+#
+# RECLAIMING IS CLAIMED, NOT ASSUMED. Removing the stale lock is serialized by an atomically created
+# sibling directory ('.../heyloey-milestones.lock.reclaim'). Only its holder may remove the lock, it
+# re-verifies the same dead holder under the claim, and it re-attempts acquisition itself. A second
+# reclaimer — or an invocation that finds a fresh lock — therefore cannot delete a lock someone else
+# just took; it skips with a notice instead.
+#
+# A skipped entry is recoverable, not lost silently: re-run the commit
+# ('git commit --amend --no-edit' re-triggers this hook) or log it directly with
+# 'npm run heyloey -- done "<summary>"'.
+#
+# DUPLICATE AVOIDANCE, STATED EXACTLY. After a run that exits 0, the hook appends a hash of
+# (day, summary) to '.git/heyloey-milestones', and a later invocation with a key already present
+# skips. The day in that key is Pacific/Auckland's, the same day the note is named after, so a commit
+# at 00:30 Auckland time is not filed under yesterday. A replayed queue record records its key the
+# same way, on the day it actually landed in. So the guarantee is: **a summary that has already been
+# logged successfully is not logged again for that day by this clone.** It is not a guarantee that a
+# partly-written entry cannot be completed twice: a run that is killed or fails after writing one of
+# the two records exits non-zero, records no key (so the entry stays retryable), and a retry that
+# lands in a later minute writes a second, differently-timestamped line. See the maintenance guide
+# for the recovery procedure.
+#
+# THE PENDING QUEUE IS THE LAST-RESORT GUARANTEE. A milestone that cannot be written from this shell
+# is not dropped: it is appended to '.git/heyloey-milestones.pending' with three tab-separated fields
+# — the UTC stamp, the Pacific/Auckland stamp and the summary — and the next commit that can write
+# replays it. The Auckland stamp is the one that decides the day, because that is the day the vault's
+# daily notes are named after. Replay passes the recorded day and time to the CLI as '--date' and
+# '--time', so a record queued at 23:50 lands in the note for the day it happened rather than in the
+# note for the day it was replayed. A two-field record from before the vault stamp existed replays
+# with its literal stamp prefixed and no date invented. A record whose summary is already in its own
+# day's note is retired instead of duplicated. A failed replay stays queued, in order, for the next
+# commit. The queue is drained under its own 'mkdir' lock ('<queue>.lock'), always taken after the
+# coordination lock and never before it, so the two can never deadlock. Losing a milestone is the one
+# unrecoverable outcome, so a queue lock that cannot be taken does not drop the record: it is
+# appended without the lock and the operator is told.
+#
+# THE PRE-FLIGHT GATE ONLY RUNS FOR A VAULT WE WERE TOLD ABOUT. Writability is probed for real — a
+# create-and-remove in the directory, an append to the file — because a permission bit misses
+# virtiofs and network mounts, which is exactly where this vault lives. The gate applies when
+# LOEY_SPACE_DIR or 'git config heyloey.vault' names a vault, or when this repository owns the GitHub
+# reconciler; a template hook inherited by an unrelated repository therefore never queues anything.
+# When the vault is not even visible from this shell the gate stands aside and lets the CLI report,
+# because writability cannot be judged from a path that is not there.
+#
+# THE RUN LOG IS DURABLE BY CONSTRUCTION. Each run appends its own record to
+# '.git/heyloey-post-commit.log', located with 'git rev-parse --git-path' so it lives with the
+# repository and survives the call. A temporary directory is only the fallback, and only after a
+# real append has proved the in-repo path unwritable: a tmpfs path passes a writability test and is
+# then destroyed with the sandbox that created it, which is how an earlier version came to report a
+# failure into a file that could never be read. The log is rotated in place at LOG_MAX_BYTES,
+# keeping the newest LOG_KEEP_LINES lines, with 'tail' and a truncating 'cat' rather than a rename,
+# because a rotation that renamed the file would send the running hook's own output into the archive.
+#
+# Per-clone configuration (all optional):
+#   heyloey.log           (bool)  default true — false disables this hook
+#   heyloey.timeout       (secs)  default 10   — hard bound on ONE logger run
+#   heyloey.drain-budget  (secs)  default 20   — total wall clock for replaying the queue
+#   heyloey.vault         (path)  default this repository's root — the vault to write into
+#   HEYLOEY_LOG=off       (env)                — one-off disable, e.g. 'HEYLOEY_LOG=off git commit'
+#   LOEY_SPACE_DIR        (env)                — names the vault explicitly, overriding the config
+#   LOEY_WSL_CLI          (env)                — the CLI path inside WSL, when it is not on the login
+#                                                shell's PATH
+#   LOEY_HOOK_OS          (env)                — forces unix/windows dispatch, for tests
+#
 
 set -u
 
-# Absolute path INSIDE WSL. Override with LOEY_WSL_CLI when the CLI lives elsewhere.
-LOEY_WSL_CLI="${LOEY_WSL_CLI:-/home/heyloey/.local/bin/heyloey}"
-VAULT="${LOEY_SPACE_DIR:-/mnt/c/Users/jonel/Documents/loey_space}"
-export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+# After the bound, the logger gets this long to exit on TERM before it is KILLed. The hook's widest
+# possible hold on the lock is therefore 'heyloey.timeout' + 'heyloey.drain-budget' + this, plus one
+# poll per bounded run.
+TERM_GRACE_SECS=2
 
+# The repository root comes from git, never from this file's own location, so a clone can move
+# anywhere and a hook run from a subdirectory still behaves identically.
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -n "${repo_root:-}" ] || exit 0
+
+note() { printf 'post-commit: %s\n' "$*" >&2; }
+
+# LOEY_HOOK_OS forces the dispatch, which is what lets the suite exercise both platforms from one
+# machine. Otherwise the platform is read from uname: a hook should not have to be told where it runs.
+hook_os=unix
 case "$(uname -s 2>/dev/null || echo unknown)" in
-  MINGW*|MSYS*|CYGWIN*) LOEY_HOOK_OS=windows ;;
-  *)                    LOEY_HOOK_OS=unix ;;
+  MINGW*|MSYS*|CYGWIN*) hook_os=windows ;;
+esac
+case "${LOEY_HOOK_OS:-}" in
+  windows) hook_os=windows ;;
+  unix) hook_os=unix ;;
 esac
 
-# /mnt/c/Users/jonel  ->  /c/Users/jonel   (Windows-visible spelling, for tests)
-to_msys_path() {
-  case "$1" in
-    /mnt/[a-zA-Z]/*) printf '/%s/%s' "${1:5:1}" "${1:7}" ;;
-    *) printf '%s' "$1" ;;
-  esac
-}
-
-# C:/Users/jonel and /c/Users/jonel  ->  /mnt/c/Users/jonel  (what the WSL CLI wants)
+# /c/Users/jonel/... -> /mnt/c/Users/jonel/... (the spelling the WSL-side CLI expects)
 to_wsl_path() {
   case "$1" in
-    //wsl.localhost/*/*)
-      # //wsl.localhost/<distro>/home/... -> /home/...
-      _rest="${1#//wsl.localhost/}"
-      printf '/%s' "${_rest#*/}"
-      ;;
     /mnt/*) printf '%s' "$1" ;;
     /[a-zA-Z]/*) printf '/mnt%s' "$1" ;;
     [a-zA-Z]:/*)
-      _drive="$(printf '%s' "${1:0:1}" | tr 'A-Z' 'a-z')"
-      printf '/mnt/%s%s' "$_drive" "${1:2}"
-      ;;
+      _drive=$(printf '%s' "${1:0:1}" | tr 'A-Z' 'a-z')
+      printf '/mnt/%s%s' "$_drive" "${1:2}" ;;
     *) printf '%s' "$1" ;;
   esac
 }
 
-# `%B` is the raw body, so a trailer survives multi-paragraph messages. Parsing is
-# version-independent (no dependence on `%(trailers:...)`) and mirrors the
-# published hook: anchored, case-sensitive, first match wins.
-COMMIT_BODY="$(git log -1 --pretty=%B 2>/dev/null)" || exit 0
-[ -n "$COMMIT_BODY" ] || exit 0
+# /mnt/c/Users/jonel/... -> /c/Users/jonel/... (the spelling this shell uses for the same directory)
+to_msys_path() {
+  case "$1" in
+    /mnt/[a-zA-Z]/*) printf '/%s%s' "$(printf '%s' "${1:5:1}")" "${1:6}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
 
-MILESTONE="$(
-  printf '%s\n' "$COMMIT_BODY" | awk '
-    /^HeyLoey-Milestone:/ {
-      value = substr($0, length("HeyLoey-Milestone:") + 1)
-      sub(/^[ \t]+/, "", value)
-      sub(/[ \t\r]+$/, "", value)
-      print value
-      exit
-    }
-  '
-)"
-
-# An empty trailer is not an opt-in: this is an ordinary commit, so write nothing.
-# Silent by default so ordinary commits add no noise to `git commit` output.
-if [ -z "$MILESTONE" ]; then
-  if [ "${LOEY_HOOK_VERBOSE:-0}" = "1" ]; then
-    printf '[heyloey hook] no "HeyLoey-Milestone:" trailer; ordinary commit, nothing logged.\n' >&2
+# The WSL-side CLI. LOEY_WSL_CLI names it explicitly; otherwise the login shell resolves the
+# installed one, so this tracked hook carries no machine-specific home path.
+wsl_cli="${LOEY_WSL_CLI:-}"
+repo_root_wsl=""
+if [ "$hook_os" = windows ] && command -v wsl.exe >/dev/null 2>&1; then
+  repo_root_wsl=$(to_wsl_path "$repo_root")
+  if [ -z "$wsl_cli" ]; then
+    wsl_cli=$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+      wsl.exe -e bash -lc 'command -v heyloey 2>/dev/null' 2>/dev/null) || wsl_cli=""
   fi
+fi
+
+# --- configuration ---------------------------------------------------------------
+config_bool() { # <key> <default> → true|false. A missing or malformed value falls back.
+  local value
+  value=$(git config --bool --get "$1" 2>/dev/null) || value=""
+  case "$value" in
+    true|false) printf '%s' "$value" ;;
+    *) printf '%s' "$2" ;;
+  esac
+}
+
+config_secs() { # <key> <default> → a positive integer
+  local value
+  value=$(git config --int --get "$1" 2>/dev/null) || value=""
+  case "$value" in
+    ''|*[!0-9]*|0) printf '%s' "$2" ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+case "${HEYLOEY_LOG:-}" in
+  off|0|false) exit 0 ;;
+esac
+
+[ "$(config_bool heyloey.log true)" = "true" ] || exit 0
+
+timeout_secs=$(config_secs heyloey.timeout 10)
+# Replaying the pending queue is bounded too: a long backlog must not hold a commit open any longer
+# than the live run would. Each individual replay still gets its own 'heyloey.timeout'.
+drain_budget_secs=$(config_secs heyloey.drain-budget 20)
+
+# The longest a legitimate invocation can hold the lock, used only to make a skip notice actionable.
+# It is derived from the configured bounds, never hard-coded: a fixed 120s would be shorter than a
+# single 'heyloey.timeout 300' run and would invite stealing a live holder's lock by age alone.
+max_hold_secs=$(( timeout_secs + drain_budget_secs + TERM_GRACE_SECS + 30 ))
+[ "$max_hold_secs" -lt 120 ] && max_hold_secs=120
+
+# --- the opt-in -----------------------------------------------------------------
+message=$(git log -1 --pretty=%B 2>/dev/null) || exit 0
+[ -n "${message:-}" ] || exit 0
+
+summary=$(printf '%s\n' "$message" | awk '
+  /^HeyLoey-Milestone:/ {
+    value = substr($0, length("HeyLoey-Milestone:") + 1)
+    sub(/^[ \t]+/, "", value)
+    sub(/[ \t\r]+$/, "", value)
+    print value
+    exit
+  }') || exit 0
+
+# A leading hyphen or whitespace would be read as an option by the CLI's argument parser, so it is
+# stripped rather than passed through (there is no `--` end-of-options form to use here).
+summary=$(printf '%s' "${summary:-}" | sed -e 's/^[-[:space:]]*//') || exit 0
+[ -n "$summary" ] || exit 0
+
+# --- the logger: WSL on Windows, repository-local then global, skip third ---------
+node_bin=$(command -v node 2>/dev/null) || node_bin=""
+bundle="$repo_root/06-Resources/scripts/heyloey.js"
+# A vault that owns the GitHub reconciler has a writer even when the portable bundle is absent: the
+# reconciler runs the installed CLI itself. Counting it here keeps the early skip below from
+# reporting "no tooling" for a vault that can perfectly well log its milestone.
+reconciler="$repo_root/06-Resources/scripts/reconcile-github-milestones.mjs"
+owns_reconciler=false
+if [ -f "$repo_root/.github-milestone-repositories.json" ] && [ -f "$reconciler" ]; then
+  owns_reconciler=true
+fi
+logger=""
+if [ -n "${repo_root_wsl:-}" ] && [ -n "${wsl_cli:-}" ]; then
+  logger="heyloey in WSL"
+elif [ -n "${node_bin:-}" ] && [ -f "$bundle" ]; then
+  logger="repo-local bundle"
+elif command -v heyloey >/dev/null 2>&1; then
+  logger="heyloey on PATH"
+fi
+
+if [ -z "$logger" ] && [ "$owns_reconciler" != true ]; then
+  # Missing tooling is an expected state in a fresh clone, not an error worth reporting on every
+  # commit. Say nothing and leave the commit alone.
   exit 0
 fi
 
-# A leading hyphen or whitespace would be read as an option by the CLI's argument
-# parser, so strip it rather than pass it through (mirrors the published hook).
-MILESTONE="$(printf '%s' "$MILESTONE" | sed -e 's/^[-[:space:]]*//')" || exit 0
-[ -n "$MILESTONE" ] || exit 0
+# The reconciler is the writer for a vault that owns it, and it needs node. Saying so here — before the
+# lock is taken and before anything is queued — keeps the refusal cheap and keeps a vault with no node
+# from collecting pending records it could never replay.
+if [ "$owns_reconciler" = true ] && [ -z "${repo_root_wsl:-}" ] && [ -z "${node_bin:-}" ]; then
+  note "milestone not logged: this vault owns the GitHub reconciler, but no node was found to run it"
+  exit 0
+fi
 
-# Resolve HOW to call the CLI. On Windows the shell cannot see the WSL filesystem
-# and the .cmd shim loses the environment (see the header), so WSL is addressed
-# directly and the vault override is carried with `env`.
-if [ "$LOEY_HOOK_OS" = windows ]; then
-  VAULT="$(to_wsl_path "$VAULT")"
-  if ! command -v wsl.exe >/dev/null 2>&1; then
-    printf '[heyloey hook] milestone NOT logged: wsl.exe is not on PATH, so the vault CLI cannot be reached from this Windows shell; nothing written.\n' >&2
-    exit 0
-  fi
-  # A Windows worktree's .git file points at a //wsl.localhost/... gitdir, which
-  # git for Linux cannot resolve from /mnt/c/...; without this the CLI sees no
-  # repository and logs the project blank. Pass the translated git context in.
-  _git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
-  _git_wt="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  LOEY_ENV=("LOEY_SPACE_DIR=$VAULT")
-  if [ -n "$_git_dir" ] && [ -n "$_git_wt" ]; then
-    LOEY_ENV+=("GIT_DIR=$(to_wsl_path "$_git_dir")")
-    LOEY_ENV+=("GIT_WORK_TREE=$(to_wsl_path "$_git_wt")")
-  fi
-  LOEY_CMD=(wsl.exe -e env "${LOEY_ENV[@]}" "$LOEY_WSL_CLI")
+# --- bounded execution is a precondition, not an optimisation --------------------
+# `sleep(1)` is the whole dependency: it is what the escalation ladder polls with. Without it there
+# is no bound, and the only honest option is to skip — an unbounded logger is exactly the failure
+# this hook must not have.
+if ! command -v sleep >/dev/null 2>&1; then
+  note "milestone not logged: sleep(1) is unavailable, so the logger cannot be bounded"
+  exit 0
+fi
+
+# Coordination is the other precondition. `mkdir` is how the lock (and a reclaim claim) is taken
+# atomically, and `rm`/`rmdir` are how they are released; without them two invocations could
+# interleave and one of them could be lost. The check is explicit so the notice says which
+# capability is missing rather than blaming a holder.
+if ! command -v mkdir >/dev/null 2>&1 || ! command -v rm >/dev/null 2>&1 || ! command -v rmdir >/dev/null 2>&1; then
+  note "milestone not logged: mkdir(1), rm(1) and rmdir(1) are needed to serialise invocations, and one is unavailable"
+  exit 0
+fi
+
+# --- the vault this hook writes into ---------------------------------------------
+# The hook can be installed in a repository that is not the vault, so the vault is named rather than
+# assumed: LOEY_SPACE_DIR wins, then 'git config heyloey.vault', and only then this repository. The
+# distinction matters because the pre-flight gate below must not run for a template hook dropped into
+# an unrelated repository — there it would queue a record on every commit and never replay it.
+VAULT_ROOT=""
+vault_is_explicit=false
+if [ -n "${LOEY_SPACE_DIR:-}" ]; then
+  VAULT_ROOT="$LOEY_SPACE_DIR"
+  vault_is_explicit=true
 else
-  # Missing tooling is the expected state of a fresh clone, not an error to report.
-  if [ -x "${HOME}/.local/bin/heyloey" ]; then
-    LOEY_CMD=(env "LOEY_SPACE_DIR=$VAULT" "${HOME}/.local/bin/heyloey")
-  elif command -v heyloey >/dev/null 2>&1; then
-    LOEY_CMD=(env "LOEY_SPACE_DIR=$VAULT" heyloey)
+  configured_vault=$(git config --get heyloey.vault 2>/dev/null) || configured_vault=""
+  if [ -n "$configured_vault" ]; then
+    VAULT_ROOT="$configured_vault"
+    vault_is_explicit=true
   else
-    exit 0
+    VAULT_ROOT="$repo_root"
   fi
 fi
-
-TODAY="$(date +%Y-%m-%d)"
-MONTH="$(date +%Y-%m)"
-NOTE_REL="01-Daily/$MONTH/$TODAY.md"
-HANDOFF_REL="handoff.md"
-
-if [ "$LOEY_HOOK_OS" = windows ]; then
-  CHECK_ROOT="$(to_msys_path "$VAULT")"
-else
-  CHECK_ROOT="$VAULT"
+vault_root_wsl=""
+if [ "$hook_os" = windows ] && [ -n "${repo_root_wsl:-}" ]; then
+  vault_root_wsl=$(to_wsl_path "$VAULT_ROOT")
 fi
 
-# Both records are required by `done`. Report the missing one early, but only when
-# the vault is actually visible from this shell: a path Git Bash cannot stat would
-# otherwise produce a false "absent" warning on every milestone commit.
-if [ -d "$CHECK_ROOT" ]; then
-  if [ ! -f "$CHECK_ROOT/$NOTE_REL" ] || [ ! -f "$CHECK_ROOT/$HANDOFF_REL" ]; then
-    MISSING=""
-    [ -f "$CHECK_ROOT/$NOTE_REL" ] || MISSING="$NOTE_REL"
-    if [ ! -f "$CHECK_ROOT/$HANDOFF_REL" ]; then
-      [ -n "$MISSING" ] && MISSING="$MISSING and "
-      MISSING="${MISSING}${HANDOFF_REL}"
-    fi
-    printf '[heyloey hook] milestone NOT logged: %s is absent in the vault; nothing written.\n' \
-      "$MISSING" >&2
-    printf '[heyloey hook] create the daily note from 99-Templates/Daily.md (or run the vault'"'"'s morning flow).\n' >&2
-    exit 0
-  fi
-elif [ "${LOEY_HOOK_VERBOSE:-0}" = "1" ]; then
-  printf '[heyloey hook] vault not visible at %s from this shell; local pre-check skipped, `done` will report.\n' \
-    "$CHECK_ROOT" >&2
-fi
+# --- paths under the Git directory: ledger, lock, capture ------------------------
+git_path() { # <name> → an absolute path inside this checkout's Git directory, or nothing
+  local value
+  value=$(git rev-parse --git-path "$1" 2>/dev/null) || return 0
+  case "$value" in
+    '') : ;;
+    /*) printf '%s' "$value" ;;
+    *) printf '%s/%s' "$repo_root" "$value" ;;
+  esac
+}
 
-# Prefer a log inside the repository: it survives a sandboxed session, a
-# crashed shell and a reboot. ${TMPDIR:-/tmp} may be a private tmpfs whose
-# contents are destroyed when the session ends, so it is only the fallback.
-OUT_LOG="$(git rev-parse --git-path heyloey-post-commit.log 2>/dev/null || echo /tmp/heyloey-post-commit.log)"
-if ! { : >>"$OUT_LOG"; } 2>/dev/null; then
-  OUT_LOG="${TMPDIR:-/tmp}/heyloey-post-commit.log"
-fi
-
-# PENDING QUEUE
-# -------------
-# A milestone that cannot be written is queued here instead of being lost. The
-# queue lives inside the repository's own .git, so it survives the session that
-# failed to log it (${TMPDIR:-/tmp} may be a private tmpfs - see OUT_LOG above).
-# One record per line, <UTC stamp><TAB><vault stamp><TAB><summary>, appended BEFORE
-# the CLI call so a logger that is killed outright still leaves the milestone
-# recoverable, and replayed by the next commit whose write succeeds (drain_queue).
-#
-# TWO stamps, deliberately. The UTC stamp is identity and ordering. The vault stamp
-# (Pacific/Auckland) is what a replay passes as `done --date/--time`, because the
-# daily note is filed by the vault calendar, not by whatever zone the shell that
-# made the commit happened to use. A two-field record is a legacy entry written
-# before the vault stamp existed: it has no usable local time, so a replay keeps the
-# old literal-prefix behaviour instead of guessing a day.
-QUEUE="$(git rev-parse --git-path heyloey-milestones.pending 2>/dev/null || printf "%s/heyloey-milestones.pending" "${TMPDIR:-/tmp}")"
-QUEUE_LOCK="${QUEUE}.lock"
-STAMP="$(date -u "+%Y-%m-%d %H:%M")"
-# TZ is set inline so the hook never depends on the host zone selection.
-STAMP_VAULT="$(TZ=Pacific/Auckland date "+%Y-%m-%d %H:%M" 2>/dev/null)"
-case "$STAMP_VAULT" in
-  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" "[0-9][0-9]:[0-9][0-9]) : ;;
-  *) STAMP_VAULT="$(date "+%Y-%m-%d %H:%M")" ;;
+# The day the entry belongs to is the vault's day, not this machine's: the daily note is written in
+# Pacific/Auckland, so a commit made at 11pm in another timezone must not land in tomorrow's note.
+vault_day=$(TZ=Pacific/Auckland date +%Y-%m-%d 2>/dev/null) || vault_day=""
+case "$vault_day" in
+  ????-??-??) : ;;
+  *) vault_day=$(date +%Y-%m-%d 2>/dev/null) || vault_day="" ;;
 esac
-QUEUE_MSG="$(printf "%s" "$MILESTONE" | tr "\t" " ")"
-RECORD="${STAMP}"$'\t'"${STAMP_VAULT}"$'\t'"${QUEUE_MSG}"
 
-# mkdir is the only atomic lock available on every filesystem this hook runs on.
-# The wait is bounded: a stale lock may delay the commit, never block it.
-queue_lock() {
-  _ql_wait=0
-  while ! mkdir "$QUEUE_LOCK" 2>/dev/null; do
-    _ql_wait=$((_ql_wait + 1))
-    [ "$_ql_wait" -ge 20 ] && return 1
-    sleep 0.05
-  done
+ledger=$(git_path heyloey-milestones)
+lock_dir=$(git_path heyloey-milestones.lock)
+# The lock is removed with 'rm -rf' and the claim with 'rmdir', so both are only ever acted on when
+# they are exactly the paths this hook constructed. Anything else — an empty result, a different
+# basename — disables coordination rather than risking an unrelated directory.
+case "$lock_dir" in
+  */heyloey-milestones.lock) : ;;
+  *) lock_dir="" ;;
+esac
+claim_dir=""
+if [ -n "$lock_dir" ]; then
+  claim_dir="$lock_dir.reclaim"
+  case "$claim_dir" in
+    */heyloey-milestones.lock.reclaim) : ;;
+    *) claim_dir="" ;;
+  esac
+fi
+
+key=$(printf '%s|%s' "$vault_day" "$summary" | git hash-object --stdin 2>/dev/null) || key=""
+
+# --- the pending queue ------------------------------------------------------------
+# A record is three tab-separated fields: the UTC stamp the commit was made, the vault stamp that
+# decides which daily note it belongs to, and the summary. A two-field record from an older hook is
+# still understood: its second column is the message, and no date is invented for it.
+queue=$(git_path heyloey-milestones.pending)
+queue_lock_dir=""
+if [ -n "$queue" ]; then
+  case "$queue" in
+    */heyloey-milestones.pending) queue_lock_dir="$queue.lock" ;;
+    *) queue="" ;;
+  esac
+fi
+
+stamp_utc=$(date -u "+%Y-%m-%d %H:%M" 2>/dev/null) || stamp_utc=""
+stamp_vault=$(TZ=Pacific/Auckland date "+%Y-%m-%d %H:%M" 2>/dev/null) || stamp_vault=""
+case "$stamp_vault" in
+  ????-??-??\ ??:??) : ;;
+  *) stamp_vault=$(date "+%Y-%m-%d %H:%M" 2>/dev/null) || stamp_vault="" ;;
+esac
+
+# --- the run log ------------------------------------------------------------------
+# The logger's own output is the only record of why a run failed, so it is written somewhere durable
+# when the repository offers one, and only falls back to a temporary directory when it does not.
+out_log=$(git_path heyloey-post-commit.log)
+if [ -n "$out_log" ] && ! { : >>"$out_log"; } 2>/dev/null; then
+  out_log=""
+fi
+if [ -z "$out_log" ]; then
+  out_log="${TMPDIR:-/tmp}/heyloey-post-commit.log"
+fi
+
+# Rotation happens in place, by truncation, never by renaming: a rename would send the output of a
+# hook that is still running into the archive file and leave the live log empty.
+LOG_MAX_BYTES=262144
+LOG_KEEP_LINES=500
+rotate_log() {
+  [ -f "$out_log" ] || return 0
+  local size keep
+  size=$(wc -c <"$out_log" 2>/dev/null) || return 0
+  case "$size" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$size" -gt "$LOG_MAX_BYTES" ] || return 0
+  keep="$out_log.$$.keep"
+  tail -n "$LOG_KEEP_LINES" "$out_log" >"$keep" 2>/dev/null || { rm -f "$keep"; return 0; }
+  cat "$keep" >"$out_log" 2>/dev/null || true
+  rm -f "$keep"
   return 0
 }
+rotate_log
 
-queue_unlock() {
-  rmdir "$QUEUE_LOCK" 2>/dev/null || true
-}
+# --- the pre-flight gate ----------------------------------------------------------
+# The CLI is the writer, and it reports precisely why it could not write. The hook's own gate exists
+# for the one case the CLI cannot help with: a vault this shell cannot write to at all, where running
+# the CLI would fail for a reason that will still be true at the next commit. Only a vault that was
+# named to us is checked — otherwise a template hook in an unrelated repository would queue records
+# it could never replay.
+NOTE_REL="01-Daily/${vault_day%-*}/${vault_day}.md"
+HANDOFF_REL="handoff.md"
+CHECK_ROOT="$VAULT_ROOT"
+if [ "$hook_os" = windows ] && [ -n "${vault_root_wsl:-}" ]; then
+  CHECK_ROOT=$(to_msys_path "$VAULT_ROOT")
+fi
 
-enqueue_record() {
-  # A single short append is atomic on every filesystem this hook runs on, so the
-  # lock is an ordering nicety, not a correctness requirement. If a stale lock
-  # cannot be cleared the milestone is still recorded - losing it would be the
-  # one unrecoverable outcome this queue exists to prevent.
-  if queue_lock; then
-    if ! printf "%s\t%s\t%s\n" "$STAMP" "$STAMP_VAULT" "$QUEUE_MSG" >>"$QUEUE" 2>/dev/null; then
-      printf '[heyloey hook] milestone NOT queued: cannot write %s.\n' "$QUEUE" >&2
-    fi
-    queue_unlock
-    return 0
-  fi
-  if printf "%s\t%s\t%s\n" "$STAMP" "$STAMP_VAULT" "$QUEUE_MSG" >>"$QUEUE" 2>/dev/null; then
-    printf '[heyloey hook] pending queue locked (%s); milestone recorded without the lock.\n' \
-      "$QUEUE_LOCK" >&2
-  else
-    printf '[heyloey hook] milestone NOT queued: cannot write %s.\n' "$QUEUE" >&2
-  fi
-}
-
-# Remove exactly one record, so a run that logged cleanly never leaves a replay
-# behind. grep -vxF matches whole lines literally: no escaping of the summary.
-dequeue_record() {
-  [ -f "$QUEUE" ] || return 0
-  queue_lock || return 0
-  _dq_want="${QUEUE}.$$.want"
-  _dq_tmp="${QUEUE}.$$.tmp"
-  _dq_ok=1
-  printf "%s\n" "$1" >"$_dq_want" 2>/dev/null || _dq_ok=0
-  if [ "$_dq_ok" = 1 ]; then
-    # grep exits 1 when the filter leaves no lines - an empty queue is SUCCESS,
-    # not a failure, so the status is inspected instead of used as the condition.
-    grep -vxF -f "$_dq_want" "$QUEUE" >"$_dq_tmp" 2>/dev/null
-    case "$?" in
-      0|1) mv "$_dq_tmp" "$QUEUE" 2>/dev/null || rm -f "$_dq_tmp" ;;
-      *)   rm -f "$_dq_tmp" ;;
-    esac
-  fi
-  rm -f "$_dq_want"
-  queue_unlock
-}
-
-# Written before the call so a logger that hangs or dies still leaves evidence of
-# the attempt next to its commit. Only the CLI's output is redirected; the status
-# messages below go to the real stderr.
-printf '\n[%s] commit %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" >>"$OUT_LOG"
-
-# PRE-FLIGHT WRITABILITY GATE
-# ---------------------------
-# The existence check above cannot see a read-only mount: under a sandbox that
-# binds the vault read-only both records are present but unwritable, so `done`
-# burns the full 30s bound and returns exit 6 having changed nothing. Probe with
-# real create and append operations - the permission bit alone misses some
-# virtiofs and network mounts - and queue the milestone instead of calling.
 probe_dir_writable() {
   [ -d "$1" ] || return 1
   [ -w "$1" ] || return 1
-  _pd="$1/.heyloey-write-probe.$$"
-  { : >"$_pd"; } 2>/dev/null || return 1
-  rm -f "$_pd" 2>/dev/null || return 1
+  local probe="$1/.heyloey-write-probe.$$"
+  { : >"$probe"; } 2>/dev/null || return 1
+  rm -f "$probe" || return 1
   return 0
 }
 
-# Opening for append writes no bytes, but a read-only mount fails it with EROFS.
 probe_file_writable() {
   [ -f "$1" ] || return 1
   [ -w "$1" ] || return 1
@@ -334,161 +472,558 @@ probe_file_writable() {
   return 0
 }
 
-GATE_PROBLEM=""
-if [ -d "$CHECK_ROOT" ]; then
-  if ! probe_dir_writable "$CHECK_ROOT"; then
-    GATE_PROBLEM="the vault root $CHECK_ROOT is not writable from this shell"
-  elif ! probe_dir_writable "$CHECK_ROOT/01-Daily/$MONTH"; then
-    GATE_PROBLEM="the daily-note directory 01-Daily/$MONTH is not writable from this shell"
-  elif ! probe_file_writable "$CHECK_ROOT/$NOTE_REL"; then
-    GATE_PROBLEM="$NOTE_REL is not writable from this shell"
-  elif ! probe_file_writable "$CHECK_ROOT/$HANDOFF_REL"; then
-    GATE_PROBLEM="$HANDOFF_REL is not writable from this shell"
-  fi
-fi
+# --- the pending queue ------------------------------------------------------------
+queue_lock() {
+  [ -n "$queue_lock_dir" ] || return 1
+  local waited=0
+  while ! mkdir "$queue_lock_dir" 2>/dev/null; do
+    waited=$((waited + 1))
+    [ "$waited" -ge 20 ] && return 1
+    sleep 0.05 2>/dev/null || sleep 1
+  done
+  return 0
+}
 
-if [ -n "$GATE_PROBLEM" ]; then
-  enqueue_record
-  printf '[heyloey hook] milestone queued, not logged now: %s. The next commit that can write replays it from %s.\n' \
-    "$GATE_PROBLEM" "$QUEUE" >&2
-  exit 0
-fi
+queue_unlock() {
+  [ -n "$queue_lock_dir" ] || return 0
+  rmdir "$queue_lock_dir" 2>/dev/null || true
+}
 
-# One caller for `done`, shared by the live path and the replay path, so both get
-# the same 30s bound and the same Windows argument-quoting. Trailing arguments pass
-# straight through: that is how a replay supplies --date and --time.
-call_done() {
-  _cd_msg="$1"
-  shift
-  if [ "$LOEY_HOOK_OS" = windows ]; then
-    if command -v timeout >/dev/null 2>&1; then
-      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-        timeout 30 "${LOEY_CMD[@]}" done "$_cd_msg" "$@" </dev/null >>"$OUT_LOG" 2>&1
-    else
-      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-        "${LOEY_CMD[@]}" done "$_cd_msg" "$@" </dev/null >>"$OUT_LOG" 2>&1
+# Appending a record is the hook's last-resort guarantee, so a locked or unwritable queue still gets
+# the record when the write itself is possible: losing the lock costs ordering, losing the record
+# costs the milestone.
+enqueue_record() {
+  [ -n "$queue" ] || return 0
+  local record="$1"
+  if queue_lock; then
+    if printf '%s\n' "$record" >>"$queue" 2>/dev/null; then
+      queue_unlock
+      return 0
     fi
-  elif command -v timeout >/dev/null 2>&1; then
-    timeout 30 "${LOEY_CMD[@]}" done "$_cd_msg" "$@" </dev/null >>"$OUT_LOG" 2>&1
-  else
-    "${LOEY_CMD[@]}" done "$_cd_msg" "$@" </dev/null >>"$OUT_LOG" 2>&1
-  fi
-}
-
-run_logger() {
-  call_done "$MILESTONE"
-}
-
-# Replay queued milestones through the same `done` call. Only ever called after a
-# write has just succeeded, so the vault is proven writable and the CLI lock is
-# free. Each record carries the Pacific/Auckland stamp taken at enqueue time and
-# that is passed as --date/--time, so a milestone queued at 23:50 and replayed at
-# 00:10 lands in the day it happened - the one thing a literal prefix could never
-# fix. A legacy two-field record has no local stamp, so it keeps the prefix.
-drain_queue() {
-  [ -s "$QUEUE" ] || return 0
-  queue_lock || return 0
-  _dq_work="${QUEUE}.$$.work"
-  if ! mv "$QUEUE" "$_dq_work" 2>/dev/null; then
     queue_unlock
+    note "milestone NOT queued: cannot write $queue"
     return 0
   fi
-  : >"$QUEUE" 2>/dev/null || rm -f "$QUEUE"
-  _dq_seen=0
-  _dq_done=0
-  _dq_left=0
-  while IFS="$(printf '\t')" read -r _r_stamp _r_vault _r_msg; do
-    [ -n "${_r_stamp:-}" ] || continue
-    # Two fields means a legacy record: the message sits in the second column.
-    # A second column that is itself a stamp is a three-field record with an empty
-    # message, which is not a milestone - skip it rather than replay a timestamp.
-    if [ -z "${_r_msg:-}" ]; then
-      case "$_r_vault" in
-        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" "[0-9][0-9]:[0-9][0-9]) continue ;;
-      esac
-      _r_msg="$_r_vault"
-      _r_vault=""
-    fi
-    _dq_seen=$((_dq_seen + 1))
-    _r_day=""
-    _r_time=""
-    case "$_r_vault" in
-      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" "[0-9][0-9]:[0-9][0-9])
-        _r_day="${_r_vault%% *}"
-        _r_time="${_r_vault#* }" ;;
-    esac
-    # Bounded: a large backlog drains over several commits instead of delaying
-    # one commit by minutes.
-    if [ "$_dq_seen" -gt 20 ]; then
-      printf "%s\t%s\t%s\n" "$_r_stamp" "$_r_vault" "$_r_msg" >>"$QUEUE" 2>/dev/null
-      _dq_left=$((_dq_left + 1))
-      continue
-    fi
-    # Already in the daily note - a partial write, or the owner fixed it by hand.
-    # Never log one milestone twice, and never duplicate a row it already has.
-    # The note checked is the record owned day, not today, or a back-dated replay
-    # would look absent every time and log itself twice.
-    _r_note="$NOTE_REL"
-    if [ -n "$_r_day" ]; then
-      _r_note="01-Daily/${_r_day%-*}/${_r_day}.md"
-    fi
-    if [ -f "$CHECK_ROOT/$_r_note" ] \
-       && grep -Fq -e "$_r_msg" "$CHECK_ROOT/$_r_note" 2>/dev/null; then
-      _dq_done=$((_dq_done + 1))
-      continue
-    fi
-    if [ -n "$_r_day" ]; then
-      call_done "$_r_msg" --date "$_r_day" --time "$_r_time"
-    else
-      call_done "[$_r_stamp] $_r_msg"
-    fi
-    if [ "$?" -eq 0 ]; then
-      _dq_done=$((_dq_done + 1))
-    else
-      printf "%s\t%s\t%s\n" "$_r_stamp" "$_r_vault" "$_r_msg" >>"$QUEUE" 2>/dev/null
-      _dq_left=$((_dq_left + 1))
-    fi
-  done <"$_dq_work"
-  rm -f "$_dq_work"
-  queue_unlock
-  if [ "$_dq_seen" -gt 0 ]; then
-    printf '[heyloey hook] pending queue: %s replayed, %s still queued (%s).\n' \
-      "$_dq_done" "$_dq_left" "$QUEUE" >&2
+  if printf '%s\n' "$record" >>"$queue" 2>/dev/null; then
+    note "pending queue locked ($queue_lock_dir); milestone recorded without the lock"
+  else
+    note "milestone NOT queued: cannot write $queue"
   fi
   return 0
 }
 
-# Queued BEFORE the call: a hook killed mid-call still leaves the milestone
-# recoverable. A clean run removes the record again a few lines below.
-enqueue_record
-run_logger
-status=$?
+# Removing exactly one record, without 'mv' or 'cp': the queue is rewritten in place from a filtered
+# copy. A grep that matched every line (exit 1) is a success here, not a failure.
+dequeue_record() {
+  [ -n "$queue" ] && [ -f "$queue" ] || return 0
+  local want="$1" listed tmp status
+  queue_lock || return 0
+  listed="$queue.$$.want"
+  tmp="$queue.$$.tmp"
+  printf '%s\n' "$want" >"$listed" 2>/dev/null || { queue_unlock; return 0; }
+  grep -vxF -f "$listed" "$queue" >"$tmp" 2>/dev/null
+  status=$?
+  case "$status" in
+    0|1) cat "$tmp" >"$queue" 2>/dev/null || true ;;
+    *) : ;;
+  esac
+  rm -f "$tmp" "$listed"
+  queue_unlock
+  return 0
+}
 
-case "$status" in
-  0)  # logged / already-recorded
-      dequeue_record "$RECORD"
-      drain_queue
-      [ "${LOEY_HOOK_VERBOSE:-0}" = "1" ] && \
-        printf '[heyloey hook] milestone logged via `done`; see %s\n' "$OUT_LOG" >&2
+# --- the logger's process lifecycle ----------------------------------------------
+logger_pid=""
+capture=""
+
+terminate_logger() { # TERM → grace → KILL, then reap. Idempotent and safe with no logger.
+  [ -n "${logger_pid:-}" ] || return 0
+  local pid="$logger_pid" waited=0
+  logger_pid=""
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null; do
+    [ "$waited" -lt "$TERM_GRACE_SECS" ] || break
+    sleep 1 || true
+    waited=$((waited + 1))
+  done
+  kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+  # Reaping is the point of this function: a KILLed child stays a zombie until it is waited for.
+  wait "$pid" 2>/dev/null || true
+  return 0
+}
+
+# --- coordination ----------------------------------------------------------------
+lock_held=""
+skip_reason=""
+
+read_lock_field() { # <name> → the field's contents, or nothing
+  cat "$lock_dir/$1" 2>/dev/null || true
+}
+
+record_writer() { # <none|pending|pid> → this lock's writer record; never written outside a lock
+  [ -n "$lock_dir" ] || return 1
+  printf '%s\n' "$1" >"$lock_dir/logger" 2>/dev/null
+}
+
+writer_field() { # → the raw writer record, so an unexpected value can be quoted back to the operator
+  read_lock_field logger
+}
+
+writer_pid() { # → the writer's pid, or nothing when the record is not one
+  local value
+  value=$(writer_field)
+  case "$value" in
+    ''|none|pending|*[!0-9]*) printf '' ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+writer_is_gone() { # 0 = no writer of this lock can still be running
+  # Only one of the three states is silent about a writer that might exist:
+  #   none      — recorded before any fork, so no writer was ever started
+  #   <pid>     — a writer was started, and it is gone when that pid is
+  #   anything else (pending, missing, unrecognised) — the writer cannot be accounted for. A killed
+  #   hook may have left one running, so this lock must not be reclaimed.
+  local raw
+  raw=$(writer_field)
+  case "$raw" in
+    none) return 0 ;;
+    ''|pending|*[!0-9]*) return 1 ;;
+  esac
+  ! kill -0 "$raw" 2>/dev/null
+}
+
+reclaim_is_safe() { # 0 = the hook and its writer are both provably gone
+  holder_is_dead || return 1
+  writer_is_gone || return 1
+  return 0
+}
+
+holder_pid() { # → the recorded holder pid, or nothing when it is not a plain number
+  local value
+  value=$(read_lock_field pid)
+  case "$value" in
+    ''|*[!0-9]*) printf '' ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+holder_is_dead() { # 0 = the recorded holder is provably gone
+  local value
+  value=$(holder_pid)
+  [ -n "$value" ] || return 1
+  ! kill -0 "$value" 2>/dev/null
+}
+
+holder_age_secs() { # → whole seconds since the lock was taken, or nothing
+  local at now
+  at=$(read_lock_field at)
+  case "$at" in
+    ''|*[!0-9]*) printf '' ;;
+    *)
+      now=$(date +%s)
+      case "$now" in
+        ''|*[!0-9]*) printf '' ;;
+        *) printf '%s' "$((now - at))" ;;
+      esac
       ;;
-  1)  if [ "$LOEY_HOOK_OS" = windows ] \
-          && tail -n 5 "$OUT_LOG" 2>/dev/null | grep -q 'execvpe'; then
-        printf '[heyloey hook] milestone NOT logged: no CLI at %s inside WSL (set LOEY_WSL_CLI); see %s\n' \
-          "$LOEY_WSL_CLI" "$OUT_LOG" >&2
-      else
-        printf '[heyloey hook] milestone logging failed (exit 1); see %s\n' "$OUT_LOG" >&2
+  esac
+}
+
+stale_lock_notice() { # why this lock is not being reclaimed; the age is reported only so a human can
+  # act, never to authorise a reclaim.
+  local pid age suffix raw wpid
+  pid=$(holder_pid)
+  if [ -z "$pid" ]; then
+    printf 'the coordination lock has no readable holder (%s), so it cannot be reclaimed safely' "$lock_dir"
+    return 0
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    age=$(holder_age_secs)
+    suffix=""
+    if [ -n "$age" ] && [ "$age" -gt "$max_hold_secs" ]; then
+      suffix=" (held for ${age}s, longer than the ${max_hold_secs}s a bounded run can hold it — if pid ${pid} is not this hook, remove $lock_dir by hand)"
+    fi
+    printf 'another invocation is already logging to this vault%s' "$suffix"
+    return 0
+  fi
+  # The hook is gone, which is deliberately NOT enough to reclaim: its writer may still be alive and
+  # able to change the records.
+  wpid=$(writer_pid)
+  if [ -n "$wpid" ]; then
+    printf 'a milestone writer (pid %s) from a killed hook is still running — not logged; stop that process, check the daily note and handoff.md for a partial entry, then re-run the commit or run the CLI directly: npm run heyloey -- done' "$wpid"
+    return 0
+  fi
+  raw=$(writer_field)
+  printf "the coordination lock cannot be reclaimed safely: its writer is unaccounted for (%s records '%s', and a writer can exist between being started and being identified) — not logged; if no logging run is active, remove %s by hand" "$lock_dir/logger" "${raw:-empty}" "$lock_dir"
+}
+
+reclaim_stale_lock() { # 0 = the way may be clear now; 1 = give up, with skip_reason set
+  local seen
+  [ -n "$claim_dir" ] || {
+    skip_reason="a stale coordination lock cannot be reclaimed here ($lock_dir)"
+    return 1
+  }
+  seen=$(holder_pid)
+  [ -n "$seen" ] || {
+    skip_reason="the coordination lock has no readable holder ($lock_dir), so it cannot be reclaimed safely"
+    return 1
+  }
+  if ! mkdir "$claim_dir" 2>/dev/null; then
+    # Another invocation is already reclaiming, or a previous reclaimer died inside its claim.
+    # Stealing the claim could put two reclaimers on the lock, so this one stands down.
+    skip_reason="another invocation is reclaiming a stale coordination lock — not logged; re-run the commit or run the CLI directly: npm run heyloey -- done"
+    return 1
+  fi
+  # Under the claim, re-verify. Only the same provably-dead holder may be removed: if the lock has
+  # been released and re-taken in the meantime, its pid differs and it is left alone.
+  if [ "$(holder_pid)" != "$seen" ] || ! holder_is_dead; then
+    rmdir "$claim_dir" 2>/dev/null || true
+    return 0
+  fi
+  if ! rm -rf "$lock_dir" 2>/dev/null; then
+    rmdir "$claim_dir" 2>/dev/null || true
+    skip_reason="the stale coordination lock could not be removed ($lock_dir)"
+    return 1
+  fi
+  rmdir "$claim_dir" 2>/dev/null || true
+  note "reclaimed a stale coordination lock left by an interrupted run"
+  return 0
+}
+
+acquire_lock() { # 0 = the lock is held by this invocation; 1 = skip with skip_reason set
+  skip_reason=""
+  if [ -z "$lock_dir" ]; then
+    skip_reason="coordination is unavailable (no lock path)"
+    return 1
+  fi
+  local attempt
+  for attempt in 1 2 3; do
+    if mkdir "$lock_dir" 2>/dev/null; then
+      lock_held="yes"
+      printf '%s\n' "$$" >"$lock_dir/pid" 2>/dev/null || true
+      printf '%s\n' "$(date +%s)" >"$lock_dir/at" 2>/dev/null || true
+      # The writer record starts as `none`, and a reclaimer will not remove a lock without a record it
+      # can trust: a lock that cannot say whether a writer exists must never come into existence. If
+      # this write fails, the run gives the lock up instead of logging behind a blind spot.
+      if ! record_writer none; then
+        skip_reason="the coordination lock's writer record could not be written ($lock_dir)"
+        release_lock
+        return 1
       fi
-      ;;
-  3) dequeue_record "$RECORD"
-     printf '[heyloey hook] milestone skipped (exit 3, synthetic opt-out); see %s\n' "$OUT_LOG" >&2 ;;
-  4) printf '[heyloey hook] milestone refused (exit 4, a required record is absent); see %s\n' "$OUT_LOG" >&2 ;;
-  5) printf '[heyloey hook] milestone partially written (exit 5); the entry is kept in %s and replayed by the next writable commit; see %s\n' "$QUEUE" "$OUT_LOG" >&2 ;;
-  6) printf '[heyloey hook] milestone NOT logged now: the write failed and no record changed (exit 6); queued in %s for replay by the next writable commit; see %s\n' "$QUEUE" "$OUT_LOG" >&2 ;;
-  7) printf '[heyloey hook] milestone NOT logged (exit 7, another process held the vault lock); the commit is unaffected; see %s\n' "$OUT_LOG" >&2 ;;
-  8) printf '[heyloey hook] milestone NOT logged (exit 8, the required kernel lock `flock` is unavailable or the lock configuration names the removed file tier); see %s\n' "$OUT_LOG" >&2 ;;
-  9) printf '[heyloey hook] milestone NOT logged (exit 9, legacy file-tier lock state is present: operator review required, nothing was written); see %s\n' "$OUT_LOG" >&2 ;;
-  124) printf '[heyloey hook] milestone NOT logged (exit 124, `done` exceeded the 30s bound; nothing was written and the commit is unaffected); see %s\n' "$OUT_LOG" >&2 ;;
-  *) printf '[heyloey hook] milestone logging failed (exit %s); see %s\n' "$status" "$OUT_LOG" >&2 ;;
-esac
+      return 0
+    fi
+    # Reclaiming needs the hook AND its writer to be provably gone: a SIGKILLed hook leaves its
+    # logger alive, and that logger can still write.
+    if reclaim_is_safe; then
+      reclaim_stale_lock || return 1
+      continue
+    fi
+    skip_reason=$(stale_lock_notice)
+    return 1
+  done
+  if [ -z "$skip_reason" ]; then
+    skip_reason="another invocation is already logging to this vault"
+  fi
+  return 1
+}
+
+release_lock() {
+  [ -n "$lock_held" ] || return 0
+  lock_held=""
+  # Only ever release a lock this invocation owns: a takeover by another process must not be undone.
+  if [ "$(read_lock_field pid)" = "$$" ]; then
+    rm -rf "$lock_dir" 2>/dev/null || true
+  fi
+}
+
+cleanup() {
+  # The logger goes first: releasing coordination state while a writer is still alive is exactly how
+  # two writers end up in one vault.
+  terminate_logger
+  [ -n "${capture:-}" ] && rm -f "$capture" 2>/dev/null
+  release_lock
+  :
+}
+
+on_signal() { # <signal number>: stop the writer, reap it, drop coordination, then exit
+  local sig="$1"
+  terminate_logger
+  note "interrupted (signal $sig): the logger was stopped and the entry was not completed"
+  cleanup
+  exit $((128 + sig))
+}
+
+# A tab inside the summary would forge a field boundary in the queue record, so the record carries a
+# tab-free copy. The CLI is given the same copy on replay, so a replay cannot write something the
+# dedupe below would then fail to find.
+queue_msg=$(printf '%s' "$summary" | tr '\t' ' ')
+
+# --- the pre-flight gate -----------------------------------------------------------
+# The CLI is the writer, and it reports precisely why it could not write. This gate exists for the
+# one case the CLI cannot help with: a vault this shell cannot write to at all, where running the CLI
+# would fail for a reason that will still be true at the next commit. It only runs for a vault that
+# was named to us (LOEY_SPACE_DIR, then 'git config heyloey.vault') or one that owns the GitHub
+# reconciler — a template hook dropped into an unrelated repository would otherwise queue a record
+# on every commit and never replay it.
+if [ "$vault_is_explicit" = true ] || [ "$owns_reconciler" = true ]; then
+  gate_problem=""
+  if ! probe_dir_writable "$CHECK_ROOT"; then
+    gate_problem="the vault root $CHECK_ROOT is not writable from this shell"
+  elif [ -d "$CHECK_ROOT/01-Daily/${vault_day%-*}" ] && ! probe_dir_writable "$CHECK_ROOT/01-Daily/${vault_day%-*}"; then
+    gate_problem="the daily-note directory 01-Daily/${vault_day%-*} is not writable from this shell"
+  elif [ -f "$CHECK_ROOT/$NOTE_REL" ] && ! probe_file_writable "$CHECK_ROOT/$NOTE_REL"; then
+    gate_problem="$NOTE_REL is not writable from this shell"
+  elif [ -f "$CHECK_ROOT/$HANDOFF_REL" ] && ! probe_file_writable "$CHECK_ROOT/$HANDOFF_REL"; then
+    gate_problem="$HANDOFF_REL is not writable from this shell"
+  fi
+  if [ -n "$gate_problem" ]; then
+    if [ -z "$queue" ]; then
+      note "milestone not logged: $gate_problem, and this repository offers no pending queue to hold it"
+      exit 0
+    fi
+    enqueue_record "$(printf '%s\t%s\t%s' "$stamp_utc" "$stamp_vault" "$queue_msg")"
+    note "milestone queued, not logged now: $gate_problem. The next commit that can write replays it from $queue."
+    exit 0
+  fi
+fi
+
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+trap cleanup EXIT
+
+if ! acquire_lock; then
+  note "$skip_reason"
+  exit 0
+fi
+
+# --- duplicate avoidance (inside the critical section) ---------------------------
+if [ -n "${ledger:-}" ] && [ -n "${key:-}" ] && [ -f "$ledger" ] && grep -qxF -- "$key" "$ledger" 2>/dev/null; then
+  note "milestone already logged today — skipped"
+  exit 0
+fi
+
+# --- run the logger under the bound ----------------------------------------------
+capture=$(git_path "heyloey-postcommit.$$.out")
+if [ -z "$capture" ]; then
+  note "milestone not logged: no writable location for the logger's output"
+  exit 0
+fi
+
+# --- record the writer's identity BEFORE the writer exists ------------------------
+# The interval between forking and recording the pid is exactly the interval in which a SIGKILL
+# would leave an unaccountable writer, so the intent is recorded first and the pid immediately after
+# the fork. If the intent cannot be written, no writer is started at all.
+if ! record_writer pending; then
+  note "milestone not logged: the writer's identity could not be recorded before starting it"
+  exit 0
+fi
+
+run_bounded() { # <seconds> <output file> <command…>
+  # The output redirection belongs to the logger, never to this function: `f() { … } ; f >file`
+  # would redirect the shell's own fd 2 for the duration of the call, which would send a trap
+  # handler's notice into a file that cleanup then deletes.
+  local secs="$1"
+  local out="$2"
+  shift 2
+  local waited=0
+  "$@" >"$out" 2>&1 &
+  logger_pid=$!
+  # From here a reclaimer can prove the writer is gone from this record alone.
+  record_writer "$logger_pid" || true
+  while kill -0 "$logger_pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      terminate_logger
+      return 124
+    fi
+    sleep 1 || true
+    waited=$((waited + 1))
+  done
+  wait "$logger_pid" 2>/dev/null
+  local status=$?
+  logger_pid=""
+  return "$status"
+}
+
+# --- running the logger -----------------------------------------------------------
+# One dispatch, used by both the live run and every replay, so a replayed record takes exactly the
+# path a live one would. Extra arguments are the replay's --date/--time.
+run_wsl_reconciler() {
+  local msg="$1"; shift
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' wsl.exe -e env "LOEY_SPACE_DIR=$repo_root_wsl" \
+    bash -lc 'exec node "$1" --root "$2" --record "$3" "${@:4}"' _ \
+    "$repo_root_wsl/06-Resources/scripts/reconcile-github-milestones.mjs" \
+    "$repo_root_wsl" "$msg" "$@"
+}
+
+run_wsl_logger() {
+  local msg="$1"; shift
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' wsl.exe -e env "LOEY_SPACE_DIR=$repo_root_wsl" \
+    "$wsl_cli" done "$msg" "$@"
+}
+
+run_logger() { # <summary> [--date <day> [--time <HH:MM>]]
+  local msg="$1"; shift
+  if [ "$owns_reconciler" = true ]; then
+    if [ -n "${repo_root_wsl:-}" ]; then
+      logger="GitHub reconciler in WSL"
+      run_bounded "$timeout_secs" "$capture" run_wsl_reconciler "$msg" "$@"
+      return $?
+    fi
+    logger="GitHub reconciler"
+    run_bounded "$timeout_secs" "$capture" "$node_bin" "$reconciler" --root "$repo_root" --record "$msg" "$@"
+    return $?
+  fi
+  if [ -n "${repo_root_wsl:-}" ] && [ -n "${wsl_cli:-}" ]; then
+    run_bounded "$timeout_secs" "$capture" run_wsl_logger "$msg" "$@"
+    return $?
+  fi
+  if [ "$logger" = "repo-local bundle" ]; then
+    run_bounded "$timeout_secs" "$capture" "$node_bin" "$bundle" --root "$repo_root" done "$msg" "$@"
+    return $?
+  fi
+  run_bounded "$timeout_secs" "$capture" heyloey --root "$VAULT_ROOT" done "$msg" "$@"
+}
+
+# --- replaying the pending queue --------------------------------------------------
+# The queue is drained only after a run that succeeded, so a vault that cannot write does not spend
+# its budget replaying into the same wall. Each record is replayed into the day note it was stamped
+# for, and a record whose summary is already in that note is retired rather than written twice.
+drain_queue() {
+  [ -n "$queue" ] && [ -s "$queue" ] || return 0
+  queue_lock || return 0
+
+  local work="$queue.$$.work"
+  if ! cat "$queue" >"$work" 2>/dev/null; then
+    rm -f "$work"
+    queue_unlock
+    return 0
+  fi
+  if ! : >"$queue" 2>/dev/null; then
+    rm -f "$work"
+    queue_unlock
+    return 0
+  fi
+
+  local started now elapsed seen=0 replayed=0 left=0
+  local r_stamp r_vault r_msg r_day r_time r_note r_key push
+  started=$(date +%s 2>/dev/null) || started=0
+
+  while IFS="$(printf '\t')" read -r r_stamp r_vault r_msg; do
+    [ -n "$r_stamp" ] || continue
+
+    # A two-field record from an older hook carries the message in its second column. A second
+    # column that is stamp-shaped is a three-field record whose message is empty, which is not one.
+    if [ -z "$r_msg" ]; then
+      case "$r_vault" in
+        ????-??-??\ ??:??) continue ;;
+      esac
+      r_msg="$r_vault"
+      r_vault=""
+    fi
+    [ -n "$r_msg" ] || continue
+
+    push=$(printf '%s\t%s\t%s' "$r_stamp" "$r_vault" "$r_msg")
+
+    now=$(date +%s 2>/dev/null) || now=0
+    elapsed=$((now - started))
+    if [ "$elapsed" -ge "$drain_budget_secs" ]; then
+      printf '%s\n' "$push" >>"$queue" 2>/dev/null || true
+      left=$((left + 1))
+      continue
+    fi
+
+    seen=$((seen + 1))
+    r_day=""
+    r_time=""
+    if [ -n "$r_vault" ]; then
+      r_day="${r_vault%% *}"
+      r_time="${r_vault#* }"
+      [ "$r_time" = "$r_vault" ] && r_time=""
+    fi
+
+    if [ -n "$r_day" ]; then
+      r_note="01-Daily/${r_day%-*}/${r_day}.md"
+    else
+      r_note="$NOTE_REL"
+    fi
+
+    if [ -f "$CHECK_ROOT/$r_note" ] && grep -Fq -e "$r_msg" "$CHECK_ROOT/$r_note" 2>/dev/null; then
+      replayed=$((replayed + 1))
+      continue
+    fi
+
+    if [ -n "$r_day" ] && [ -n "$r_time" ]; then
+      run_logger "$r_msg" --date "$r_day" --time "$r_time"
+    elif [ -n "$r_day" ]; then
+      run_logger "$r_msg" --date "$r_day"
+    else
+      # No day was ever recorded for this one, so none is invented: the literal prefix is kept.
+      run_logger "[$r_stamp] $r_msg"
+    fi
+
+    if [ "$?" -eq 0 ]; then
+      r_key=$(printf '%s|%s' "${r_day:-$vault_day}" "$r_msg" | git hash-object --stdin 2>/dev/null) || r_key=""
+      if [ -n "$ledger" ] && [ -n "$r_key" ]; then
+        printf '%s\n' "$r_key" >>"$ledger" 2>/dev/null || true
+      fi
+      replayed=$((replayed + 1))
+    else
+      printf '%s\n' "$push" >>"$queue" 2>/dev/null || true
+      left=$((left + 1))
+    fi
+  done <"$work"
+
+  rm -f "$work"
+  queue_unlock
+
+  if [ "$seen" -gt 0 ]; then
+    note "pending queue: $replayed replayed, $left still queued ($queue)"
+  fi
+  return 0
+}
+
+# --- the live run, then the queue -------------------------------------------------
+# The record is queued BEFORE the run: a hook that is interrupted mid-logger still leaves the
+# milestone on record, and a successful run simply removes it again. The queue is drained only after
+# a run that succeeded, so a vault that cannot write is never asked to replay into the same wall.
+record=$(printf '%s\t%s\t%s' "$stamp_utc" "$stamp_vault" "$queue_msg")
+enqueue_record "$record"
+
+printf '\n[%s] commit %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" >>"$out_log" 2>/dev/null || true
+
+run_logger "$summary"
+logger_status=$?
+# Kept because a replay may run a logger of its own and overwrite the name above.
+logger_name="$logger"
+
+if [ "$logger_status" -eq 0 ]; then
+  dequeue_record "$record"
+  drain_queue
+  if [ -n "${ledger:-}" ] && [ -n "${key:-}" ]; then
+    printf '%s\n' "$key" >>"$ledger" 2>/dev/null || true
+  fi
+  note "logged milestone to today's daily note and handoff.md ($logger_name)"
+else
+  # The commonest cause is a vault that is not set up yet (no daily note for today, no handoff.md),
+  # and the next is the bound above cutting off a logger that would not exit. The logger's own
+  # message names the first, so pass it through — trimmed, to the terminal only, never into a record.
+  note "milestone not logged (logger exit $logger_status) — the commit is unaffected"
+  case "$logger_status" in
+    3) dequeue_record "$record"
+       note "the CLI declined this milestone (exit 3), so it is not kept for replay" ;;
+    4) note "a record the CLI needs is absent (exit 4); the entry is kept in $queue for the next commit that can write" ;;
+    5|6) note "the write failed (exit $logger_status); the entry is kept in $queue for the next commit that can write" ;;
+    124) note "the logger exceeded heyloey.timeout (${timeout_secs}s) and was stopped" ;;
+    *) : ;;
+  esac
+  sed -e '/^[[:space:]]*$/d' -e 's/^/  /' "$capture" 2>/dev/null | head -n 3 >&2 || true
+fi
+
+# The logger's own words are appended to the durable log so a failure can be read back later.
+if [ -f "$capture" ]; then
+  sed -e '/^[[:space:]]*$/d' "$capture" 2>/dev/null >>"$out_log" 2>/dev/null || true
+fi
 
 exit 0
