@@ -11,9 +11,17 @@
  *
  *     ~/.git-template/hooks/post-commit
  *
- * `--repo <path>` installs into an existing repository's own hook directory
- * instead (`git -C <path> rev-parse --git-path hooks`), for repositories created
- * before the template existed or that opt out of inheritance.
+ * `--repo <path>` installs into an existing repository's hook directory, resolved
+ * the way git resolves it (`git rev-parse --git-path hooks`, so `core.hooksPath`
+ * is honoured), for repositories created before the template existed or that opt
+ * out of inheritance.
+ *
+ * A hook directory named by `core.hooksPath` is often not a plain hooks directory
+ * but a dispatcher another tool owns (lefthook, husky). Writing there replaces the
+ * generated dispatcher, and every job it routed is then lost silently: the file
+ * installed is never the one git would have run. Such a directory is refused even
+ * under --force, and `--hooks-dir <path>` is the explicit way to name a different
+ * destination instead.
  *
  * Safety rules:
  *  - An existing target is copied to
@@ -72,8 +80,13 @@ function usage() {
 Install the vault-milestone post-commit hook from this repository.
 
 Options:
-  --repo <path>   Install into that repository's own hook directory
+  --repo <path>   Install into that repository's hook directory, resolved the
+                  way git resolves it (core.hooksPath is honoured). A directory
+                  owned by a hook dispatcher (lefthook, husky) is refused.
                   (default: the user-level git template, ~/.git-template)
+  --hooks-dir <path>
+                  Write into exactly this directory instead, bypassing --repo
+                  resolution. Use it for the directory a dispatcher routes to.
   --force         Replace an existing hook this installer did not write
   --dry-run       Report what would happen; change nothing
   --help, -h      Show this help
@@ -103,6 +116,7 @@ const help = takeFlag('--help') || takeFlag('-h');
 const force = takeFlag('--force');
 const dryRun = takeFlag('--dry-run');
 const repo = takeOption('--repo');
+const hooksDirOption = takeOption('--hooks-dir');
 
 if (help) {
   usage();
@@ -112,20 +126,59 @@ if (args.length) fail(`unexpected argument: ${args[0]}`);
 
 if (!fs.existsSync(SOURCE)) fail(`tracked hook source is missing: ${SOURCE}`);
 
-/** Resolve the destination hook path. */
+/**
+ * Directories a dispatcher generator owns, recognised by the files it writes
+ * beside the hooks themselves. lefthook leaves an ownership marker next to its
+ * worktree-local shims; husky leaves a generated prelude.
+ */
+const DISPATCHER_MARKERS = ['.dsh-lefthook-owned', '.lefthook-owned', '_/husky.sh'];
+
+function dispatcherOwner(hooksDir) {
+  for (const marker of DISPATCHER_MARKERS) {
+    if (fs.existsSync(path.join(hooksDir, marker))) return marker;
+  }
+  // A lefthook dispatcher identifies itself even when its marker file is absent.
+  const post = path.join(hooksDir, 'post-commit');
+  if (fs.existsSync(post)) {
+    const head = fs.readFileSync(post, 'utf8').split('\\n', 40).join('\\n');
+    if (head.startsWith('#!/bin/sh') && /call_lefthook run/.test(head)) return 'lefthook dispatcher';
+  }
+  return null;
+}
+
+/**
+ * Resolve the destination hook path.
+ *
+ * `--hooks-dir` wins because it is the operator naming the destination. Otherwise
+ * git decides, and when git points at a dispatcher-owned directory the install is
+ * refused: writing there replaces the dispatcher, so every job it routed vanishes
+ * with no error, and the installed hook is never the one git would have run.
+ */
 function resolveTarget() {
+  if (hooksDirOption !== null) {
+    return path.join(path.resolve(hooksDirOption), 'post-commit');
+  }
   if (repo === null) return DEFAULT_TARGET;
   const repoPath = path.resolve(repo);
   if (!fs.existsSync(repoPath)) fail(`--repo does not exist: ${repoPath}`);
-  let hooksDir;
+  let hooksPath;
   try {
-    hooksDir = execFileSync('git', ['-C', repoPath, 'rev-parse', '--git-path', 'hooks'], {
+    hooksPath = execFileSync('git', ['-C', repoPath, 'rev-parse', '--git-path', 'hooks'], {
       encoding: 'utf8'
     }).trim();
   } catch {
     fail(`--repo is not a git repository: ${repoPath}`);
   }
-  return path.resolve(repoPath, hooksDir, 'post-commit');
+  const hooksDir = path.resolve(repoPath, hooksPath);
+  const owner = dispatcherOwner(hooksDir);
+  if (owner !== null) {
+    fail(
+      `REFUSED: ${hooksDir} is owned by a hook dispatcher (${owner}), not by this installer.\n` +
+        `heyloey-hook: writing there would replace the dispatcher and silently drop every job it routed.\n` +
+        `heyloey-hook: install beside it instead, e.g. --hooks-dir ${path.join(repoPath, '.git', 'hooks')}`
+    );
+  }
+  return path.join(hooksDir, 'post-commit');
 }
 
 const target = resolveTarget();
