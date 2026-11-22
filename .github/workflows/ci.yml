@@ -32,8 +32,17 @@ jobs:
       - name: Run installer safety tests
         run: npm run test:install
 
+      - name: Run hook installer tool tests
+        run: npm run test:hook-tool
+
       - name: Run post-commit hook regression tests
         run: npm run test:hook
+
+      - name: Run hook coordination tests
+        run: npm run test:coord
+
+      - name: Run hook queue replay tests
+        run: npm run test:queue
 
       - name: Run escaping and deduplication tests
         run: npm run test:escaping
@@ -49,6 +58,12 @@ jobs:
 
       - name: Run migrate-log regression tests
         run: npm run test:migrate
+
+      - name: Run back-dated milestone tests
+        run: npm run test:date
+
+      - name: Run reconciler health tests
+        run: npm run test:health
 
       - name: Run integration tests (temporary vault)
         run: npm run test:integration
