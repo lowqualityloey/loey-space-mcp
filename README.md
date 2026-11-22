@@ -177,7 +177,7 @@ re-image of the machine discards it.
 
 ## 🧪 Testing
 
-The repository features nine suites, plus a script that runs them all (counts below are measured, not estimated):
+The repository features fourteen suites, plus a script that runs them all (counts below are measured, not estimated):
 
 1. **Hermetic Unit & Regression Suite** (20 tests, runs in CI without external dependencies):
    ```bash
@@ -187,40 +187,73 @@ The repository features nine suites, plus a script that runs them all (counts be
    ```bash
    npm run test:install
    ```
-3. **Post-commit Hook Suite** (3 tests: trailer gating, foreign-hook refusal, core.hooksPath):
+3. **Hook Installer Tool Suite** (8 tests, drives `tools/install-hook.mjs`: plain-repository install,
+   refusal of a `core.hooksPath` dispatcher directory, lefthook detection without its marker file,
+   `--hooks-dir` placement, foreign-hook refusal and `--force`, idempotent re-run, `--dry-run`, and
+   parity with the tracked hook source):
+   ```bash
+   npm run test:hook-tool
+   ```
+4. **Post-commit Hook Suite** (3 tests: trailer gating, foreign-hook refusal, core.hooksPath):
    ```bash
    npm run test:hook
    ```
-4. **Escaping & Dedupe Suite** (3 tests: HTML escaping in both records, exact-entry deduplication):
+5. **Hook Coordination Suite** (9 tests, drives the real hook body in a throwaway repository: standing
+   down on a live lock, reclaiming a lock whose hook and writer are both gone, refusing to steal a lock
+   from a killed hook whose writer may still run, the TERM bound on a hung logger, both silent-disable
+   switches, ledger admission, and queue drain or retention):
    ```bash
-   npm run test:escaping
+   npm run test:coord
    ```
-5. **Search-Engine Parity Suite** (3 tests: module/CLI parity and symlinked invocation):
-   ```bash
-   npm run test:search
-   ```
-6. **Migrate-Log Suite** (16 tests, covers area creation, explicit selection, ambiguous and unmatched refusals, dry-run and idempotency):
-   ```bash
-   npm run test:migrate
-   ```
-7. **Back-Dated Milestone Suite** (7 tests: named-day filing, an untouched `updated:` field, absent-day
-   refusal, flag validation, dry-run preview and clock-time defaulting):
-   ```bash
-   npm run test:date
-   ```
-8. **Queue Replay Suite** (6 tests, drives the real hook body: queuing with a vault stamp, dated replay,
+6. **Queue Replay Suite** (6 tests, drives the real hook body: queuing with a vault stamp, dated replay,
    legacy two-field replay, own-day dedupe, and re-queue on failure):
    ```bash
    npm run test:queue
    ```
-9. **Integration Suite** (5 tests, runs real canonical CLI in temporary isolated mock vaults):
+7. **Escaping & Dedupe Suite** (3 tests: HTML escaping in both records, exact-entry deduplication):
    ```bash
-   npm run test:integration
+   npm run test:escaping
    ```
-10. **Run All** (78 tests total):
+8. **Search-Engine Parity Suite** (3 tests: module/CLI parity and symlinked invocation):
    ```bash
-   npm run test:all
+   npm run test:search
    ```
+9. **Vault Root Targeting Suite** (3 tests: `--root` selecting the vault for read-only and writing
+   commands, `--root` winning over the environment fallbacks, and a `--root` without a directory being
+   refused before any command runs):
+   ```bash
+   npm run test:root
+   ```
+10. **Dry-Run & Preview Suite** (5 tests: `--dry-run` previewing every writer without changing a byte,
+    `--show-paths` versus vault-relative defaults, refusal of `--dry-run` on a read-only command,
+    `done --personal` never touching `handoff.md`, and `learn` merging into its marked region):
+    ```bash
+    npm run test:dry-run
+    ```
+11. **Migrate-Log Suite** (16 tests, covers area creation, explicit selection, ambiguous and unmatched refusals, dry-run and idempotency):
+    ```bash
+    npm run test:migrate
+    ```
+12. **Back-Dated Milestone Suite** (7 tests: named-day filing, an untouched `updated:` field, absent-day
+    refusal, flag validation, dry-run preview and clock-time defaulting):
+    ```bash
+    npm run test:date
+    ```
+13. **Reconciler Health Suite** (10 tests, asserts the `[MAINTENANCE ALERTS]` section of `brief`: a
+    healthy tick staying silent, an unclean or missing `RESULT`, a lock refusal counting as unfinished
+    work, staleness past two hours, failure never also reported as stale, a drifted receipt naming
+    `--enable`, and a vault that declares no repositories staying quiet):
+    ```bash
+    npm run test:health
+    ```
+14. **Integration Suite** (5 tests, runs real canonical CLI in temporary isolated mock vaults):
+    ```bash
+    npm run test:integration
+    ```
+15. **Run All** (105 tests total):
+    ```bash
+    npm run test:all
+    ```
 
 ---
 
