@@ -5,12 +5,43 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {createPolicy, runCanonical, createServer, resolveCliPath} from '../src/safe-mcp.mjs';
+import {normalizeObjectSchema} from '@modelcontextprotocol/sdk/server/zod-compat.js';
+import {toJsonSchemaCompat} from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js';
 import {createMockVault} from './helpers/mock-vault.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MOCK_CLI = path.resolve(__dirname, 'helpers/mock-cli.cjs');
-const CLIENT_SCHEMA = path.resolve(__dirname, '../clients/antigravity/heyloey_done.json');
-const CLIENT_LEARN_SCHEMA = path.resolve(__dirname, '../clients/antigravity/heyloey_learn.json');
+const CLIENT_DIR = path.resolve(__dirname, '../clients/antigravity');
+
+// The Antigravity client schemas are a cache of what the server advertises over
+// MCP. Comparing a hand-picked field or two (minLength, an enum, the presence of
+// a property) certifies drift instead of catching it: three files had silently
+// diverged while those assertions passed. Derive the expected schema from the
+// same zod definitions the server registers, through the same conversion the SDK
+// applies when it answers tools/list, and compare the whole thing.
+function advertisedParameters(server, name) {
+  const tool = server._registeredTools[name];
+  assert.ok(tool, `Tool ${name} must be registered`);
+  const obj = normalizeObjectSchema(tool.inputSchema);
+  assert.ok(obj, `${name}: inputSchema must be an object schema`);
+  return toJsonSchemaCompat(obj, {strictUnions: true, pipeStrategy: 'input'});
+}
+
+async function assertClientSchemaParity(server, name) {
+  const file = path.join(CLIENT_DIR, `${name}.json`);
+  const checkedIn = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(checkedIn.name, name, `${name}.json must describe the tool of the same name`);
+  assert.equal(
+    checkedIn.description,
+    server._registeredTools[name].description,
+    `${name}.json description drifted from the server`
+  );
+  assert.deepEqual(
+    checkedIn.parameters,
+    advertisedParameters(server, name),
+    `${name}.json parameters drifted from the server; regenerate with: node tools/export-client-schemas.mjs`
+  );
+}
 
 test('createPolicy - boundary & path restrictions', async () => {
   const vault = await createMockVault();
@@ -277,14 +308,8 @@ test('createServer - schema alignment and parity for heyloey_done', async () => 
     const parseBadScope = doneTool.inputSchema.safeParse({ summary: 'completed milestone', scope: '[bad]' });
     assert.equal(parseBadScope.success, false, 'Server schema must reject scope containing brackets');
 
-    // Verify repository client schema parity
-    const schemaJson = JSON.parse(await fs.readFile(CLIENT_SCHEMA, 'utf8'));
-    assert.equal(
-      schemaJson.parameters.properties.summary.minLength,
-      5,
-      'Client JSON schema must declare minLength: 5 matching server validation'
-    );
-    assert.ok(schemaJson.parameters.properties.scope, 'Client JSON schema must declare optional scope');
+    // Verify the checked-in client schema matches the server exactly
+    await assertClientSchemaParity(server, 'heyloey_done');
 
     // Execution with scope formats [scope] prefix
     const res = await doneTool.handler({ summary: 'shipped feature', scope: 'repo/feat' });
@@ -321,17 +346,44 @@ test('createServer - schema alignment and parity for heyloey_learn', async () =>
     assert.equal(parsed.success, true);
     assert.equal(parsed.data.lang, 'bash');
 
-    // Verify repository client schema parity
-    const schemaJson = JSON.parse(await fs.readFile(CLIENT_LEARN_SCHEMA, 'utf8'));
-    assert.equal(schemaJson.parameters.properties.title.minLength, 3);
-    assert.equal(schemaJson.parameters.properties.fix.minLength, 10);
-    assert.deepEqual(schemaJson.parameters.properties.lang.enum, ['bash', 'typescript', 'python', 'yaml']);
+    // Verify the checked-in client schema matches the server exactly
+    await assertClientSchemaParity(server, 'heyloey_learn');
 
     // Execution works through mock CLI
     const res = await learnTool.handler({ title: 'Test Title', fix: 'Root cause and fix description', lang: 'typescript' });
     assert.equal(res.isError, false);
     const data = JSON.parse(res.content[0].text);
     assert.equal(data.successful, true);
+  } finally {
+    await vault.cleanup();
+  }
+});
+
+test('clients/antigravity - every checked-in schema matches the server', async () => {
+  const vault = await createMockVault();
+  try {
+    const server = await createServer({vault: vault.root, cli: MOCK_CLI});
+    const names = Object.keys(server._registeredTools).sort();
+
+    // The directory must describe exactly the registered tools: a stale file for
+    // a removed tool is as wrong as a missing file for a new one.
+    const onDisk = (await fs.readdir(CLIENT_DIR)).filter((file) => file.endsWith('.json')).sort();
+    assert.deepEqual(
+      onDisk,
+      names.map((name) => `${name}.json`),
+      'clients/antigravity must hold one schema per registered tool and nothing else; regenerate with: node tools/export-client-schemas.mjs'
+    );
+
+    for (const name of names) await assertClientSchemaParity(server, name);
+
+    // The instructions file is advertised to the client too, so it drifts the
+    // same way a schema does.
+    const instructions = await fs.readFile(path.join(CLIENT_DIR, 'instructions.md'), 'utf8');
+    assert.equal(
+      instructions,
+      server.server._instructions ?? '',
+      'clients/antigravity/instructions.md drifted from the server instructions; regenerate with: node tools/export-client-schemas.mjs'
+    );
   } finally {
     await vault.cleanup();
   }

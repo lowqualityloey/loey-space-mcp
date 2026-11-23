@@ -67,7 +67,7 @@ loey-space-mcp/
 │   ├── heyloey.cjs                  # Verified canonical CLI with flock and lock-state support
 │   └── package.json                 # Declares type: commonjs for canonical CLI
 ├── clients/
-│   ├── antigravity/                 # Schemas (heyloey_done.json, read_text_file.json, etc.)
+│   ├── antigravity/                 # Generated tool schemas (one JSON per tool, plus instructions.md)
 │   └── config.example.json          # Example client configurations
 ├── src/
 │   ├── search-engine.cjs            # Single BM25/Porter/synonym engine (required by the CLI)
@@ -77,7 +77,7 @@ loey-space-mcp/
 │   ├── helpers/
 │   │   ├── mock-vault.mjs           # Ephemeral vault fixture generator
 │   │   └── mock-cli.cjs             # Mock CLI simulator
-│   ├── test-safe-mcp.mjs            # 20 hermetic unit and regression tests
+│   ├── test-safe-mcp.mjs            # 21 hermetic unit and regression tests
 │   ├── test-integration.mjs         # 5 integration tests running canonical CLI in temp vault
 │   ├── test-migrate-log.mjs         # 16 migrate-log separation, refusal and receipt tests
 │   ├── test-install-hook.mjs        # 3 trailer-gated post-commit hook tests
@@ -86,6 +86,7 @@ loey-space-mcp/
 ├── hooks/
 │   └── post-commit                  # Tracked source of the portable vault-milestone hook
 ├── tools/
+│   ├── export-client-schemas.mjs    # Regenerates clients/antigravity/ from the registered tools
 │   ├── install-cli.mjs              # Idempotent installer for the installed `heyloey` command
 │   └── install-hook.mjs             # Idempotent installer for the post-commit hook
 ├── docs/
@@ -179,7 +180,7 @@ re-image of the machine discards it.
 
 The repository features fourteen suites, plus a script that runs them all (counts below are measured, not estimated):
 
-1. **Hermetic Unit & Regression Suite** (20 tests, runs in CI without external dependencies):
+1. **Hermetic Unit & Regression Suite** (21 tests, runs in CI without external dependencies):
    ```bash
    npm test
    ```
@@ -261,6 +262,21 @@ The repository features fourteen suites, plus a script that runs them all (count
 
 MCP servers run as persistent daemon child processes managed by client agents (e.g., Antigravity, Claude Desktop, Cursor, OpenCode).
 > **Important**: Changing symlinks or updating files in this repository **does not reload live sessions**. To pick up changes, restart the host agent application or toggle the MCP server off and on.
+
+### Client schemas are generated, not written
+
+`clients/antigravity/` holds a cache of what the server advertises over MCP: one JSON file per
+registered tool plus `instructions.md`. Do not hand-edit those files. They are derived from the same
+zod definitions the server registers, through the same conversion the MCP SDK applies when it answers
+`tools/list`, so the checked-in copy cannot disagree with the wire format:
+
+```bash
+node tools/export-client-schemas.mjs          # rewrite the files
+node tools/export-client-schemas.mjs --check  # exit 1 and name each drifted file
+```
+
+`npm test` compares every file against the live server and fails on any drift, including a stale file
+for a tool that no longer exists. Regenerate after changing a tool's description or input schema.
 
 ---
 
