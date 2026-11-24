@@ -377,3 +377,30 @@ test('an explicit heyloey.cli is used when heyloey is not on PATH', async () => 
     await fs.rm(ctx.root, {recursive: true, force: true});
   }
 });
+
+test('an unusable heyloey.cli is reported and never falls back', async () => {
+  for (const label of ['missing', 'non-executable']) {
+    const ctx = await makeRepo(`loey-unusable-cli-${label}-`);
+    try {
+      const cli = path.join(ctx.root, 'configured-cli');
+      if (label === 'non-executable') {
+        await fs.writeFile(cli, '#!/usr/bin/env bash\nexit 0\n', {mode: 0o644});
+      }
+
+      // A valid heyloey remains in fake-bin: falling back to PATH would be observable in the capture.
+      spawnSync('git', ['config', 'heyloey.cli', cli], {cwd: ctx.root});
+      gitCommit(ctx.root, 'chore: unusable explicit cli\n\nHeyLoey-Milestone: must not fall back');
+
+      const {result, queuePath} = await runHook(ctx);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stderr, /heyloey\.cli is not an executable file/);
+      assert.ok(result.stderr.includes(cli), 'the report names the configured path: ' + result.stderr);
+
+      const captured = await fs.readFile(ctx.capture, 'utf8').catch(() => '');
+      assert.equal(captured, '', `${label}: the hook must not invoke the PATH fallback`);
+      assert.equal((await fs.readFile(queuePath, 'utf8')).trim(), '', `${label}: an invalid CLI must not be queued`);
+    } finally {
+      await fs.rm(ctx.root, {recursive: true, force: true});
+    }
+  }
+});
