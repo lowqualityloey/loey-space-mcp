@@ -63,18 +63,22 @@ async function runHook(ctx, options) {
     await fs.chmod(path.join(ctx.vault, 'handoff.md'), 0o444);
   }
 
+  const env = {
+    ...process.env,
+    HOME: ctx.root,
+    PATH: ctx.binDir + ':' + process.env.PATH,
+    LOEY_SPACE_DIR: ctx.vault,
+    LOEY_HOOK_OS: settings.hookOs || 'unix',
+    LOEY_TEST_CAPTURE: ctx.capture,
+    LOEY_TEST_EXIT: settings.exitCode || '0'
+  };
+  if (settings.omitVaultEnv) delete env.LOEY_SPACE_DIR;
+  Object.assign(env, settings.env || {});
+
   const result = spawnSync('bash', [HOOK_SOURCE], {
     cwd: ctx.root,
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      HOME: ctx.root,
-      PATH: ctx.binDir + ':' + process.env.PATH,
-      LOEY_SPACE_DIR: ctx.vault,
-      LOEY_HOOK_OS: 'unix',
-      LOEY_TEST_CAPTURE: ctx.capture,
-      LOEY_TEST_EXIT: settings.exitCode || '0'
-    }
+    env
   });
   return {result, queuePath, notePath};
 }
@@ -206,6 +210,41 @@ test('a legacy record queued for another day is replayed into that day', async (
     const {result, queuePath} = await runHook(ctx, {queue: record + '\n'});
     assert.equal(result.status, 0, result.stderr);
     assert.equal((await fs.readFile(queuePath, 'utf8')).trim(), '', 'dedupe reads the record day note');
+  } finally {
+    await fs.rm(ctx.root, {recursive: true, force: true});
+  }
+});
+
+test('the Windows WSL logger uses heyloey.vault, not the repo root', async () => {
+  const ctx = await makeRepo('loey-wsl-vault-');
+  try {
+    const wslCapture = path.join(ctx.root, 'wsl-capture.txt');
+    const wsl = path.join(ctx.binDir, 'wsl.exe');
+    await fs.writeFile(wsl, [
+      '#!/usr/bin/env bash',
+      'printf "%s\n" "$*" >> "${LOEY_TEST_WSL_CAPTURE:-/dev/null}"',
+      'case "$*" in',
+      '  *"command -v heyloey"*) printf "%s\n" "${LOEY_TEST_WSL_CLI:-/fake/heyloey}" ;;',
+      'esac',
+      'exit 0',
+      ''
+    ].join('\n'), {mode: 0o755});
+
+    spawnSync('git', ['config', 'heyloey.vault', ctx.vault], {cwd: ctx.root});
+    gitCommit(ctx.root, 'chore: windows dispatch\n\nHeyLoey-Milestone: configured vault routing');
+    const {result, queuePath} = await runHook(ctx, {
+      hookOs: 'windows',
+      omitVaultEnv: true,
+      env: {LOEY_TEST_WSL_CAPTURE: wslCapture, LOEY_TEST_WSL_CLI: '/fake/heyloey'}
+    });
+    assert.equal(result.status, 0, result.stderr);
+
+    const calls = await fs.readFile(wslCapture, 'utf8');
+    const logged = calls.split('\n').filter((line) => line.includes(' done '));
+    assert.ok(logged.length > 0, 'the hook must invoke the WSL logger: ' + calls);
+    assert.ok(logged.some((line) => line.includes('LOEY_SPACE_DIR=' + ctx.vault + ' ')), 'the configured vault must reach the logger: ' + calls);
+    assert.ok(!logged.some((line) => line.includes('LOEY_SPACE_DIR=' + ctx.root + ' ')), 'the repo root must not override heyloey.vault: ' + calls);
+    assert.equal((await fs.readFile(queuePath, 'utf8')).trim(), '', 'a successful WSL log must not queue');
   } finally {
     await fs.rm(ctx.root, {recursive: true, force: true});
   }

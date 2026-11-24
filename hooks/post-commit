@@ -859,7 +859,7 @@ run_wsl_reconciler() {
 
 run_wsl_logger() {
   local msg="$1"; shift
-  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' wsl.exe -e env "LOEY_SPACE_DIR=$repo_root_wsl" \
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' wsl.exe -e env "LOEY_SPACE_DIR=$vault_root_wsl" \
     "$wsl_cli" done "$msg" "$@"
 }
 
