@@ -865,6 +865,8 @@ run_wsl_logger() {
 
 run_logger() { # <summary> [--date <day> [--time <HH:MM>]]
   local msg="$1"; shift
+  # The reconciler owns its allowlist and verification files in the repository, so its --root stays
+  # the repo even when heyloey.vault names a separate logging vault.
   if [ "$owns_reconciler" = true ]; then
     if [ -n "${repo_root_wsl:-}" ]; then
       logger="GitHub reconciler in WSL"
@@ -880,7 +882,7 @@ run_logger() { # <summary> [--date <day> [--time <HH:MM>]]
     return $?
   fi
   if [ "$logger" = "repo-local bundle" ]; then
-    run_bounded "$timeout_secs" "$capture" "$node_bin" "$bundle" --root "$repo_root" done "$msg" "$@"
+    run_bounded "$timeout_secs" "$capture" "$node_bin" "$bundle" --root "$VAULT_ROOT" done "$msg" "$@"
     return $?
   fi
   run_bounded "$timeout_secs" "$capture" heyloey --root "$VAULT_ROOT" done "$msg" "$@"
