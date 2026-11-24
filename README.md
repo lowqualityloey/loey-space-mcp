@@ -90,7 +90,8 @@ loey-space-mcp/
 │   ├── install-cli.mjs              # Idempotent installer for the installed `heyloey` command
 │   └── install-hook.mjs             # Idempotent installer for the post-commit hook
 ├── docs/
-│   └── cli-unification-plan.md      # Proposed consolidation of the CLI implementations
+│   ├── cli-unification-plan.md      # Proposed consolidation of the CLI implementations
+│   └── post-commit-hook-exceptions.md # Why four oct-project hooks intentionally stay legacy
 ├── LICENSE                          # MIT
 └── package.json
 ```
@@ -170,6 +171,29 @@ Installation is idempotent and non-destructive:
   each new repository, so a backup left there would end up in every future `.git/hooks`.
 - The swap is a single atomic `rename`, so an interrupted install leaves either the old hook or the
   new one and never half of one.
+
+### Explicit CLI path
+
+The hook normally finds `heyloey` through a repository bundle or `PATH`. If the installed command is
+present but not on the commit environment's `PATH` — for example `~/.local/bin/heyloey` in a
+non-login WSL shell — configure it once per clone:
+
+```bash
+git config heyloey.cli "$HOME/.local/bin/heyloey"
+```
+
+The path must name an executable file. It is tried before the repository bundle and `PATH` fallback.
+If it is missing or not executable, the hook reports the problem and skips logging rather than
+silently choosing a different CLI. On Windows, keep using `LOEY_WSL_CLI` for the CLI path inside
+WSL, because the Windows hook dispatches through `wsl.exe`.
+
+### Deliberate exceptions
+
+Four `oct-project` working copies — `deal-radar`, `fastdesk`, `recipebox`, and `supplywatch` — are
+intentionally kept on the legacy hook. They predate the config-based vault/PATH resolution, and
+upgrading them would currently change the vault target and drop operator diagnostics. Do not include
+them in a template sweep. The full decision and upgrade checklist are in
+[docs/post-commit-hook-exceptions.md](docs/post-commit-hook-exceptions.md).
 
 Edit `hooks/post-commit` here, never an installed copy: the installed file is an artifact and a
 re-image of the machine discards it.

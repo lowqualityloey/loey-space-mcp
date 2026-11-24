@@ -27,7 +27,7 @@
 # this hook needs are 'git', 'node' and the repository's own bundle.
 #
 # Fail-open, always. This hook never changes a commit's outcome:
-#   - no Node and no 'heyloey' on PATH -> silent skip
+#   - no Node, no 'heyloey' on PATH, and no explicit 'heyloey.cli' -> silent skip
 #   - today's daily note or handoff absent -> the logger refuses; reported, never fatal
 #   - the logger errors, hangs, or refuses to die -> reported, never fatal
 #   - coordination or a bound cannot be arranged -> the entry is skipped with a notice
@@ -37,10 +37,12 @@
 # cleaning up (git ignores a post-commit exit status, so the commit still stands). The pre-commit
 # hook is the opposite — it blocks, and it stays that way.
 #
-# The tool it prefers is the repository-local bundle ('06-Resources/scripts/heyloey.js'), reached
-# through 'node'. A global 'heyloey' on PATH is the fallback, and when neither exists the hook does
-# nothing. The vault is named explicitly with '--root', never guessed, so the entry lands in the
-# named vault's records and not in whichever vault happens to be current.
+# The tool it prefers is an explicit 'heyloey.cli' when configured, then the repository-local bundle
+# ('06-Resources/scripts/heyloey.js') reached through 'node', then a global 'heyloey' on PATH. When
+# none exists the hook does nothing. An explicit CLI path is for environments where the command is
+# installed but not on PATH, such as a non-login WSL shell. The vault is named explicitly with
+# '--root', never guessed, so the entry lands in the named vault's records and not in whichever vault
+# happens to be current.
 #
 # THE VAULT IS NAMED EXPLICITLY, IN ONE PLACE. VAULT_ROOT is resolved once, in this order:
 # LOEY_SPACE_DIR, then 'git config heyloey.vault', then this repository's own root. A portable clone
@@ -159,6 +161,7 @@
 #   heyloey.timeout       (secs)  default 10   — hard bound on ONE logger run
 #   heyloey.drain-budget  (secs)  default 20   — total wall clock for replaying the queue
 #   heyloey.vault         (path)  default this repository's root — the vault to write into
+#   heyloey.cli           (path)  default empty — explicit CLI executable, before bundle/PATH
 #   HEYLOEY_LOG=off       (env)                — one-off disable, e.g. 'HEYLOEY_LOG=off git commit'
 #   LOEY_SPACE_DIR        (env)                — names the vault explicitly, overriding the config
 #   LOEY_WSL_CLI          (env)                — the CLI path inside WSL, when it is not on the login
@@ -288,9 +291,19 @@ owns_reconciler=false
 if [ -f "$repo_root/.github-milestone-repositories.json" ] && [ -f "$reconciler" ]; then
   owns_reconciler=true
 fi
+# An explicit CLI path is for environments where 'heyloey' is installed but not on PATH — a
+# non-login WSL shell is the common case. It takes precedence over the bundle and PATH fallbacks;
+# the Windows WSL dispatch stays first because a native Windows CLI cannot take the vault lock.
+explicit_cli=$(git config --get heyloey.cli 2>/dev/null) || explicit_cli=""
 logger=""
 if [ -n "${repo_root_wsl:-}" ] && [ -n "${wsl_cli:-}" ]; then
   logger="heyloey in WSL"
+elif [ -n "$explicit_cli" ]; then
+  if [ ! -f "$explicit_cli" ] || [ ! -x "$explicit_cli" ]; then
+    note "milestone not logged: heyloey.cli is not an executable file: $explicit_cli"
+    exit 0
+  fi
+  logger="heyloey (heyloey.cli)"
 elif [ -n "${node_bin:-}" ] && [ -f "$bundle" ]; then
   logger="repo-local bundle"
 elif command -v heyloey >/dev/null 2>&1; then
@@ -879,6 +892,10 @@ run_logger() { # <summary> [--date <day> [--time <HH:MM>]]
   fi
   if [ -n "${repo_root_wsl:-}" ] && [ -n "${wsl_cli:-}" ]; then
     run_bounded "$timeout_secs" "$capture" run_wsl_logger "$msg" "$@"
+    return $?
+  fi
+  if [ "$logger" = "heyloey (heyloey.cli)" ]; then
+    run_bounded "$timeout_secs" "$capture" "$explicit_cli" --root "$VAULT_ROOT" done "$msg" "$@"
     return $?
   fi
   if [ "$logger" = "repo-local bundle" ]; then

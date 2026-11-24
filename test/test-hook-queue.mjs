@@ -346,3 +346,34 @@ test('the WSL reconciler keeps the repo root for its allowlist', async () => {
     await fs.rm(ctx.root, {recursive: true, force: true});
   }
 });
+
+test('an explicit heyloey.cli is used when heyloey is not on PATH', async () => {
+  const ctx = await makeRepo('loey-explicit-cli-');
+  try {
+    const cli = path.join(ctx.root, 'configured-cli');
+    await fs.writeFile(cli, [
+      '#!/usr/bin/env bash',
+      'printf "%s\n" "$*" >> "$LOEY_TEST_CAPTURE"',
+      'exit 0',
+      ''
+    ].join('\n'), {mode: 0o755});
+
+    spawnSync('git', ['config', 'heyloey.vault', ctx.vault], {cwd: ctx.root});
+    spawnSync('git', ['config', 'heyloey.cli', cli], {cwd: ctx.root});
+    gitCommit(ctx.root, 'chore: explicit cli\n\nHeyLoey-Milestone: configured CLI path');
+
+    // Remove PATH lookup from the equation: only the configured executable can satisfy this run.
+    const {result, queuePath} = await runHook(ctx, {
+      omitVaultEnv: true,
+      env: {PATH: '/usr/bin:/bin'}
+    });
+    assert.equal(result.status, 0, result.stderr);
+
+    const calls = await fs.readFile(ctx.capture, 'utf8').catch(() => '');
+    assert.ok(calls.includes('--root ' + ctx.vault), 'the configured CLI gets the vault root: ' + calls);
+    assert.ok(calls.includes('configured CLI path'), 'the configured CLI receives the summary: ' + calls);
+    assert.equal((await fs.readFile(queuePath, 'utf8')).trim(), '', 'a successful explicit CLI run must not queue');
+  } finally {
+    await fs.rm(ctx.root, {recursive: true, force: true});
+  }
+});
