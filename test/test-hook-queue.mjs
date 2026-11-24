@@ -249,3 +249,100 @@ test('the Windows WSL logger uses heyloey.vault, not the repo root', async () =>
     await fs.rm(ctx.root, {recursive: true, force: true});
   }
 });
+
+async function writeNodeCaptureStub(file, envName, esm = false) {
+  await fs.mkdir(path.dirname(file), {recursive: true});
+  await fs.writeFile(file, [
+    esm ? "import fs from 'node:fs';" : "const fs = require('node:fs');",
+    'fs.writeFileSync(process.env.' + envName + ', JSON.stringify(process.argv.slice(2)));',
+    ''
+  ].join('\n'));
+}
+
+async function writeArgvWsl(ctx) {
+  const wsl = path.join(ctx.binDir, 'wsl.exe');
+  await fs.writeFile(wsl, [
+    '#!/usr/bin/env bash',
+    'printf "%s\n" "$@" >> "$LOEY_TEST_WSL_CAPTURE"',
+    'case "$*" in',
+    '  *"command -v heyloey"*) printf "%s\n" "${LOEY_TEST_WSL_CLI:-/fake/heyloey}" ;;',
+    'esac',
+    'exit 0',
+    ''
+  ].join('\n'), {mode: 0o755});
+}
+
+test('the repo-local bundle uses heyloey.vault, not the repo root', async () => {
+  const ctx = await makeRepo('loey-bundle-vault-');
+  try {
+    const capture = path.join(ctx.root, 'bundle-capture.json');
+    await writeNodeCaptureStub(path.join(ctx.root, '06-Resources', 'scripts', 'heyloey.js'), 'LOEY_TEST_BUNDLE_CAPTURE');
+    spawnSync('git', ['config', 'heyloey.vault', ctx.vault], {cwd: ctx.root});
+    gitCommit(ctx.root, 'chore: bundle dispatch\n\nHeyLoey-Milestone: configured bundle routing');
+    const {result, queuePath} = await runHook(ctx, {omitVaultEnv: true, env: {LOEY_TEST_BUNDLE_CAPTURE: capture}});
+    assert.equal(result.status, 0, result.stderr);
+
+    const argv = JSON.parse(await fs.readFile(capture, 'utf8'));
+    const at = argv.indexOf('--root');
+    assert.ok(at >= 0, 'the bundle invocation carries --root: ' + JSON.stringify(argv));
+    assert.equal(argv[at + 1], ctx.vault, 'the bundle must receive the configured vault');
+    assert.ok(argv.includes('configured bundle routing'));
+    assert.equal((await fs.readFile(queuePath, 'utf8')).trim(), '', 'a successful bundle log must not queue');
+  } finally {
+    await fs.rm(ctx.root, {recursive: true, force: true});
+  }
+});
+
+test('the native reconciler keeps the repo root for its allowlist', async () => {
+  const ctx = await makeRepo('loey-native-reconciler-vault-');
+  try {
+    const capture = path.join(ctx.root, 'reconciler-capture.json');
+    await fs.writeFile(path.join(ctx.root, '.github-milestone-repositories.json'), '{"repositories":["example/repo"]}\n');
+    await writeNodeCaptureStub(path.join(ctx.root, '06-Resources', 'scripts', 'reconcile-github-milestones.mjs'), 'LOEY_TEST_RECONCILER_CAPTURE', true);
+    // The configured vault is deliberately different: the reconciler must still use the repo root.
+    spawnSync('git', ['config', 'heyloey.vault', ctx.vault], {cwd: ctx.root});
+    gitCommit(ctx.root, 'chore: reconciler dispatch\n\nHeyLoey-Milestone: configured reconciler routing');
+    const {result, queuePath} = await runHook(ctx, {omitVaultEnv: true, env: {LOEY_TEST_RECONCILER_CAPTURE: capture}});
+    assert.equal(result.status, 0, result.stderr);
+
+    const argv = JSON.parse(await fs.readFile(capture, 'utf8'));
+    const at = argv.indexOf('--root');
+    assert.ok(at >= 0, 'the reconciler invocation carries --root: ' + JSON.stringify(argv));
+    assert.equal(argv[at + 1], ctx.root, 'the reconciler must receive the repository root that owns its allowlist');
+    assert.equal(argv[argv.indexOf('--record') + 1], 'configured reconciler routing');
+    assert.equal((await fs.readFile(queuePath, 'utf8')).trim(), '', 'a successful reconciler log must not queue');
+  } finally {
+    await fs.rm(ctx.root, {recursive: true, force: true});
+  }
+});
+
+test('the WSL reconciler keeps the repo root for its allowlist', async () => {
+  const ctx = await makeRepo('loey-wsl-reconciler-vault-');
+  try {
+    const capture = path.join(ctx.root, 'wsl-reconciler-capture.txt');
+    await fs.writeFile(path.join(ctx.root, '.github-milestone-repositories.json'), '{"repositories":["example/repo"]}\n');
+    await fs.mkdir(path.join(ctx.root, '06-Resources', 'scripts'), {recursive: true});
+    await fs.writeFile(path.join(ctx.root, '06-Resources', 'scripts', 'reconcile-github-milestones.mjs'), '// stub\n');
+    await writeArgvWsl(ctx);
+    // The configured vault is deliberately different: the reconciler must still use the repo root.
+    spawnSync('git', ['config', 'heyloey.vault', ctx.vault], {cwd: ctx.root});
+    gitCommit(ctx.root, 'chore: wsl reconciler dispatch\n\nHeyLoey-Milestone: configured wsl reconciler routing');
+    const {result, queuePath} = await runHook(ctx, {
+      hookOs: 'windows',
+      omitVaultEnv: true,
+      env: {LOEY_TEST_WSL_CAPTURE: capture, LOEY_TEST_WSL_CLI: '/fake/heyloey'}
+    });
+    assert.equal(result.status, 0, result.stderr);
+
+    const args = (await fs.readFile(capture, 'utf8')).split('\n').filter(Boolean);
+    assert.ok(args.includes('LOEY_SPACE_DIR=' + ctx.root), 'the reconciler environment must name the repo root: ' + args.join(' | '));
+    assert.ok(args.includes(ctx.root), 'the reconciler must receive the repository root as its root: ' + args.join(' | '));
+    assert.ok(!args.includes('LOEY_SPACE_DIR=' + ctx.vault), 'the configured vault must not override the repo root: ' + args.join(' | '));
+    assert.ok(!args.includes(ctx.vault), 'the configured vault must not be passed as the reconciler root: ' + args.join(' | '));
+    assert.ok(args.some((arg) => arg.includes('/06-Resources/scripts/reconcile-github-milestones.mjs')), 'the script still comes from the repo');
+    assert.ok(args.some((arg) => arg.includes('configured wsl reconciler routing')));
+    assert.equal((await fs.readFile(queuePath, 'utf8')).trim(), '', 'a successful WSL reconciler log must not queue');
+  } finally {
+    await fs.rm(ctx.root, {recursive: true, force: true});
+  }
+});
